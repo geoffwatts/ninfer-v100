@@ -157,7 +157,8 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
 // docs/volta-port.md.
 bool w8_launch_needs_volta_fallback(W8Launch launch) noexcept {
     return launch != launch_w8_decode_r4 && launch != launch_w8_small_t &&
-           launch != launch_w8_simt_r8_c4 && launch != launch_w8_simt_r8_c8;
+           launch != launch_w8_simt_r8_c4 && launch != launch_w8_simt_r8_c8 &&
+           launch != launch_w8_simt_r4_c16;
 }
 #endif
 
@@ -167,6 +168,7 @@ W8Launch select_w8_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
     case LinearPolicy::AllowA8: {
         const W8Launch launch = select_w8_a16_launch(n, k, t);
 #ifdef NINFER_VOLTA_BUILD
+        if (t > 8) { return launch_w8_simt_r4_c16; }
         if (w8_launch_needs_volta_fallback(launch)) { return launch_w8_small_t; }
 #endif
         return launch;

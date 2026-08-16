@@ -78,7 +78,7 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
 bool q5_launch_needs_volta_fallback(Q5Launch launch) noexcept {
     return launch != launch_q5_gemv_r16_s2_x && launch != launch_q5_simt_split4_exact &&
            launch != launch_q5_simt_split2_exact && launch != launch_q5_simt_r8_c4 &&
-           launch != launch_q5_simt_r8_c8;
+           launch != launch_q5_simt_r8_c8 && launch != launch_q5_simt_r4_c16;
 }
 #endif
 
@@ -88,6 +88,7 @@ Q5Launch select_q5_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
     case LinearPolicy::AllowA8: {
         const Q5Launch launch = select_q5_a16_launch(n, k, t);
 #ifdef NINFER_VOLTA_BUILD
+        if (t > 8 && t <= 32) { return launch_q5_simt_r4_c16; }
         if (q5_launch_needs_volta_fallback(launch)) { return launch_q5_simt_r8_c8; }
 #endif
         return launch;
