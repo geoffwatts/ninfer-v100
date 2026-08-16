@@ -146,7 +146,20 @@ w8_simt_consume_slab(const __nv_bfloat16* __restrict__ x0, std::int64_t xslab, s
 // aligned, else 0 (everything runs through the scalar tail).
 template <class Schedule, int ColsPerTile, int RowsPerCta, int PipelineStages, bool Full,
           W8Epilogue Epilogue = W8Epilogue::Store, class Output = W8ContiguousOutput>
-__global__ void w8_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
+__global__
+#ifdef NINFER_VOLTA_BUILD
+// ncu measured this kernel (the w8 vocab/lm-head projection, N=248320) at 81 registers/thread,
+// Block Limit Registers=2, Theoretical Occupancy only 25% -- no __launch_bounds__ existed here
+// at all before this. Swept minBlocks 3/4/5/6/8 (each measured via ncu occupancy + nsys/decode
+// speed + byte-identical correctness across 3 prompts and MTP): monotonic improvement through 5
+// (paired with the shared-memory carveout request in the launcher below, without which shared
+// memory co-limits back down to whatever registers alone would give), roughly flat 5->6, then a
+// real regression at 8 (too tight a register squeeze, same shape of failure round 2 hit on a
+// different kernel). 5 is the plateau's conservative edge. Net win, both paths, same prompt:
+// MTP 33.33 -> ~36.2 tok/s (+8.6%), non-MTP 31.35 -> ~32.35 tok/s (+3.2%).
+__launch_bounds__(RowsPerCta * 32, 5)
+#endif
+void w8_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ scales, Output output,
                                              std::int32_t rows, std::int32_t k, std::int32_t cols,

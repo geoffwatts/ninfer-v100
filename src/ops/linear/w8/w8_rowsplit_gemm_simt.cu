@@ -13,6 +13,21 @@ namespace {
 constexpr int kRowsPerBlockDefault = 8;
 constexpr int kStages              = 2;
 
+#ifdef NINFER_VOLTA_BUILD
+// Same "request the max shared-memory carveout once" pattern as q5_rowsplit_gemv's occupancy
+// fix -- ncu showed shared memory co-limiting at the same block count as registers once the
+// launch_bounds fix above landed, so raising the carveout gives the higher minBlocks target
+// room to actually take effect instead of shared memory silently capping it back down.
+template <typename KernelPtr>
+inline void w8_simt_request_max_shared_carveout(KernelPtr kernel) {
+    static bool done = [&] {
+        cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+        return true;
+    }();
+    (void)done;
+}
+#endif
+
 template <int ColsPerTile, bool Full>
 void launch_tt(const __nv_bfloat16* xp, const std::uint8_t* codes, const std::uint8_t* scales,
                __nv_bfloat16* outp, std::int32_t n, std::int32_t k, std::int32_t t,
@@ -21,6 +36,11 @@ void launch_tt(const __nv_bfloat16* xp, const std::uint8_t* codes, const std::ui
     const dim3 grid(static_cast<unsigned>(div_up(n, kRowsPerBlockDefault)),
                     static_cast<unsigned>(div_up(t, ColsPerTile)), 1u);
     const W8ContiguousOutput output{outp, n};
+#ifdef NINFER_VOLTA_BUILD
+    w8_simt_request_max_shared_carveout(
+        w8_rowsplit_gemm_simt_kernel<W8RowSplitSimtSchedule, ColsPerTile, kRowsPerBlockDefault,
+                                     kStages, Full>);
+#endif
     w8_rowsplit_gemm_simt_kernel<W8RowSplitSimtSchedule, ColsPerTile, kRowsPerBlockDefault, kStages,
                                  Full><<<grid, kBlockThreads, 0, stream>>>(
         xp, codes, scales, output, n, k, t, padded_k, full_slabs);

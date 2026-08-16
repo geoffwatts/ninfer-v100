@@ -1,7 +1,11 @@
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
 
 #include "ops/linear_add/q5/q5_linear_add_kernels.h"
+#ifdef NINFER_VOLTA_BUILD
+#include "ops/linear_add/q5/q5_linear_add_cutlass_sm70.h"
+#endif
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <stdexcept>
@@ -36,6 +40,34 @@ constexpr std::array<SupportSpec, 2> kSupports{{
     {5120, 17408, 17408},
 }};
 
+#ifdef NINFER_VOLTA_BUILD
+// MmaResidualR64C* need Ampere+ mma/ldmatrix and are trap-stubbed on sm_70.
+// SimtWideTResidual (q5_linear_add_simt_wide_t_launch) is q5_rowsplit_gemm_simt_kernel with
+// AddResidual=true and cols as a runtime grid parameter, so it covers every width above
+// Split2ExactResidual's compile-time-switch ceiling -- but it's still plain SIMT, and this op
+// (MLP down-projection at k=17408, attention gate/value at k=6144) was the single largest
+// prefill kernel end to end (measured ~47% of total prefill GPU time at k=17408). Above the
+// measured small-T routes, CutlassSm70TensorCoreResidual instead dequantizes
+// to FP16 and runs NVIDIA CUTLASS's Sm70 (real mma.sync.m8n8k4) GEMM with beta=1 so the
+// epilogue reads the existing residual as C and writes the sum back as D in place --
+// independently verified (correctness against this exact SIMT kernel, L2 relative error
+// ~0.17%; 19.6x measured speedup at the real N=5120/K=17408/T=256 down-proj shape on this
+// V100). Cold-cache sweeps place both CUTLASS crossovers at T=17: for k=6144 the last SIMT
+// win is T=16 (429us versus 439us), while for k=17408 the exact split2 route owns through T=16
+// and the former wide-T SIMT route is already slower than CUTLASS at T=17. See docs/volta-port.md.
+constexpr std::array<RouteSpec, 4> kK6144Routes{{
+    {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
+    {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{14, 16}, Q5LinearAddScheduleId::SimtWideTResidual},
+    {{17, kAnyCols}, Q5LinearAddScheduleId::CutlassSm70TensorCoreResidual},
+}};
+
+constexpr std::array<RouteSpec, 3> kK17408Routes{{
+    {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
+    {{2, 16}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{17, kAnyCols}, Q5LinearAddScheduleId::CutlassSm70TensorCoreResidual},
+}};
+#else
 constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
     {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
@@ -53,6 +85,7 @@ constexpr std::array<RouteSpec, 6> kK17408Routes{{
     {{49, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
     {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
 }};
+#endif
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) noexcept {
@@ -94,6 +127,10 @@ const char* q5_linear_add_schedule_name(Q5LinearAddScheduleId schedule) noexcept
         return "linear_add.q5.mma.r64.c64.cta_collective_residual";
     case Q5LinearAddScheduleId::MmaResidualR64C128:
         return "linear_add.q5.mma.r64.c128.cta_collective_residual";
+    case Q5LinearAddScheduleId::SimtWideTResidual:
+        return "linear_add.q5.simt.wide_t.residual";
+    case Q5LinearAddScheduleId::CutlassSm70TensorCoreResidual:
+        return "linear_add.q5.cutlass_sm70.tensor_core.residual";
     }
     return "linear_add.q5.unknown";
 }
@@ -109,7 +146,15 @@ Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
 
     const auto resolve_from = [&](const auto& routes) -> Q5LinearAddPlan {
         for (const RouteSpec& route : routes) {
-            if (route.cols.contains(problem.cols)) { return {route.schedule, 0}; }
+            if (!route.cols.contains(problem.cols)) { continue; }
+            std::size_t workspace_bytes = 0;
+#ifdef NINFER_VOLTA_BUILD
+            if (route.schedule == Q5LinearAddScheduleId::CutlassSm70TensorCoreResidual) {
+                workspace_bytes =
+                    q5_linear_add_cutlass_workspace_bytes(problem.rows, problem.k, problem.cols);
+            }
+#endif
+            return {route.schedule, workspace_bytes};
         }
         throw std::logic_error("q5 linear_add: admitted problem has no covering route");
     };
@@ -122,10 +167,13 @@ std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32
     if (min_cols <= 0 || max_cols < min_cols) {
         throw std::invalid_argument("q5 linear_add: invalid column interval");
     }
-    (void)q5_linear_add_resolve_plan({rows, k, padded_k, min_cols});
-    (void)q5_linear_add_resolve_plan({rows, k, padded_k, max_cols});
+    // CutlassSm70TensorCoreResidual's workspace is monotonic in cols (the FP16 weight-dequant
+    // buffer is fixed at rows*k, the activation-cast buffer scales with cols), so the true
+    // maximum over [min_cols,max_cols] is always at max_cols.
+    const Q5LinearAddPlan at_min = q5_linear_add_resolve_plan({rows, k, padded_k, min_cols});
+    const Q5LinearAddPlan at_max = q5_linear_add_resolve_plan({rows, k, padded_k, max_cols});
 
-    return 0;
+    return std::max(at_min.workspace_bytes, at_max.workspace_bytes);
 }
 
 void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, const Weight& w,
@@ -135,7 +183,9 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
     if (resolved.schedule != plan.schedule || resolved.workspace_bytes != plan.workspace_bytes) {
         throw std::invalid_argument("q5 linear_add: plan does not match the exact problem");
     }
-    (void)ws;
+#ifndef NINFER_VOLTA_BUILD
+    (void)ws; // only CutlassSm70TensorCoreResidual (Volta-only) uses the workspace arena
+#endif
 
     switch (plan.schedule) {
     case Q5LinearAddScheduleId::GemvResidual:
@@ -156,6 +206,16 @@ void q5_linear_add_execute_plan(const Q5LinearAddPlan& plan, const Tensor& x, co
     case Q5LinearAddScheduleId::MmaResidualR64C128:
         q5_linear_add_mma_r64_c128_launch(x, w, residual_out, stream);
         return;
+    case Q5LinearAddScheduleId::SimtWideTResidual:
+        q5_linear_add_simt_wide_t_launch(x, w, residual_out, stream);
+        return;
+    case Q5LinearAddScheduleId::CutlassSm70TensorCoreResidual:
+#ifdef NINFER_VOLTA_BUILD
+        q5_linear_add_cutlass_sm70_launch(x, w, residual_out, ws, stream);
+        return;
+#else
+        throw std::logic_error("q5 linear_add: CutlassSm70TensorCoreResidual is Volta-only");
+#endif
     }
     throw std::logic_error("q5 linear_add: unknown schedule");
 }

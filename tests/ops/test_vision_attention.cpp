@@ -202,7 +202,8 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
                 throw std::logic_error("uniform case requires equal segments");
             }
         }
-        ops::vision_attention(q_tensor, k_tensor, v_tensor, segment_length, out_tensor, nullptr);
+        ops::vision_attention(q_tensor, k_tensor, v_tensor, segment_length, workspace, out_tensor,
+                              nullptr);
     }
     cuda_synchronize();
 
@@ -248,7 +249,17 @@ int main() {
     }
 
     int failures = 0;
-    if (ops::vision_attention_workspace_capacity_bytes(4, 194, 1, 1) != 0 ||
+    // The maximal-legal-pair property is the real contract and holds on every route.
+    // Whether a single-segment envelope needs zero bytes is route-specific: the
+    // descriptor path needs no tiles for one segment, while a staging path restages
+    // q/k/v regardless of how the patches are partitioned.
+#ifndef NINFER_VOLTA_BUILD
+    const bool single_segment_is_free =
+        ops::vision_attention_workspace_capacity_bytes(4, 194, 1, 1) == 0;
+#else
+    const bool single_segment_is_free = true;
+#endif
+    if (!single_segment_is_free ||
         ops::vision_attention_workspace_capacity_bytes(4, 194, 1, 3) !=
             ops::vision_attention_workspace_capacity_bytes(194, 194, 3, 3)) {
         std::cerr << "vision_attention rectangular capacity missed its maximal legal pair\n";

@@ -47,7 +47,10 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     Tensor x(device_activation.p, DType::BF16, {kHidden, tokens});
     Tensor output   = qkv.tensor();
     Tensor z_output = z.tensor();
-    ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, nullptr);
+    const std::size_t capacity = ops::q4_q5_gdn_input_proj_workspace_capacity_bytes(tokens, tokens);
+    DeviceArena workspace(std::max<std::size_t>(capacity, 256));
+    ops::gdn_input_proj(x, query_key.view(), value_z_weight.view(), output, z_output, workspace,
+                        nullptr);
     cuda_synchronize();
 
     const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
@@ -92,7 +95,14 @@ int run_w8_case(DevicePackedWeight& parent, std::int32_t tokens) {
     Tensor x(device_activation.p, DType::BF16, {kHidden, tokens});
     Tensor qkv_output = qkv.tensor();
     Tensor z_output   = z.tensor();
-    ops::gdn_input_proj(x, parent.view(), qkv_output, z_output, nullptr);
+    // Workspace-bearing overload: the wide-T route stages a dequantized parent,
+    // and the convenience overload would silently take the in-place path instead,
+    // leaving that route uncovered.
+    const std::size_t capacity = ops::gdn_input_proj_workspace_capacity_bytes(
+        QType::W8G32_F16S, kQkvRows + kZRows, kHidden, ops::LinearPolicy::A16Only, tokens, tokens);
+    WorkspaceArena workspace(std::max<std::size_t>(capacity, 256));
+    ops::gdn_input_proj(x, parent.view(), qkv_output, z_output, ops::LinearPolicy::A16Only,
+                        workspace, nullptr);
     cuda_synchronize();
 
     const std::string suffix = " W8 A16 T=" + std::to_string(tokens);

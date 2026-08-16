@@ -409,7 +409,7 @@ __launch_bounds__(128, 10) __global__ void q5_rowsplit_gemm_simt_split4_kernel(
 // full_slabs is computed on the host: k/1024 when k % 8 == 0 and x is 16-byte
 // aligned, else 0 (everything runs through the scalar tail).
 template <class SC, int kTt, int kRowsPerBlock, int kStages, bool SplitOutput = false,
-          int SplitRow = 0>
+          int SplitRow = 0, bool AddResidual = false>
 __global__ void q5_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x,
                                              const std::uint8_t* __restrict__ codes,
                                              const std::uint8_t* __restrict__ high,
@@ -506,13 +506,19 @@ __global__ void q5_rowsplit_gemm_simt_kernel(const __nv_bfloat16* __restrict__ x
         if (lane == 0) {
             if constexpr (SplitOutput) {
                 if (row < SplitRow) {
-                    out[static_cast<std::int64_t>(col0 + tt) * out_ld + row] = __float2bfloat16(a);
+                    const std::int64_t index = static_cast<std::int64_t>(col0 + tt) * out_ld + row;
+                    if constexpr (AddResidual) { a += __bfloat162float(out[index]); }
+                    out[index] = __float2bfloat16(a);
                 } else {
-                    out_tail[static_cast<std::int64_t>(col0 + tt) * (n - SplitRow) + row -
-                             SplitRow] = __float2bfloat16(a);
+                    const std::int64_t index =
+                        static_cast<std::int64_t>(col0 + tt) * (n - SplitRow) + row - SplitRow;
+                    if constexpr (AddResidual) { a += __bfloat162float(out_tail[index]); }
+                    out_tail[index] = __float2bfloat16(a);
                 }
             } else {
-                out[static_cast<std::int64_t>(col0 + tt) * out_ld + row] = __float2bfloat16(a);
+                const std::int64_t index = static_cast<std::int64_t>(col0 + tt) * out_ld + row;
+                if constexpr (AddResidual) { a += __bfloat162float(out[index]); }
+                out[index] = __float2bfloat16(a);
             }
         }
     }

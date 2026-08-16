@@ -235,6 +235,46 @@ add_library(ninfer_ops STATIC
   ops/wrapper/sparse_moe.cpp
   ops/wrapper/vision_attention.cpp
   ops/wrapper/vision_pos_embed.cpp)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "70")
+  # CUTLASS Sm70 tensor-core path for the q4 MLP gate/up GEMM (see
+  # q4_linear_swiglu_cutlass_sm70.cu and docs/volta-port.md). --expt-relaxed-constexpr is
+  # needed by CUTLASS's own headers (e.g. conv3d_problem_size.h's constexpr host calls from
+  # host/device functions); applied target-wide since it doesn't affect codegen for code that
+  # doesn't use it.
+  target_sources(ninfer_ops PRIVATE
+    ops/linear_swiglu/q4/q4_linear_swiglu_cutlass_sm70.cu
+    ops/linear_add/q5/q5_linear_add_cutlass_sm70.cu
+    ops/attn_input_proj/q4_q5/q4_q5_attn_input_cutlass_sm70.cu
+    ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_cutlass_sm70.cu
+    ops/gdn_input_proj/w8/w8_gdn_input_cutlass_sm70.cu)
+  target_link_libraries(ninfer_ops PRIVATE nvidia::cutlass::cutlass)
+  target_compile_options(ninfer_ops PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+
+  # Volta flash-attention prefill route, driving the vendored llama.cpp MMA kernel
+  # (third_party/llama_cpp_fattn, pinned at 62bf73d25 -- see its README.md).
+  #
+  # The include directory is scoped to this one source file rather than added to
+  # ninfer_ops: the vendored tree contains `common.cuh` and `mma.cuh`, and src/ops
+  # has its own `ops/common/mma.cuh` plus two `gated_delta_net/common.cuh`. Nothing
+  # in src/ includes either name unqualified today, so a target-wide include would
+  # happen to work -- but it would make any future unqualified include silently
+  # resolve to the wrong header.
+  #
+  # --extended-lambda: the kernel's tile loaders use __device__ lambdas.
+  # -diag-suppress 940: upstream mma.cuh has a missing-return warning in
+  #   ggml_cuda_mma::unscramble, on a path no flash-attention config instantiates.
+  target_sources(ninfer_ops PRIVATE
+    ops/launcher/gqa_attention_volta_flash.cu
+    ops/launcher/vision_attention_volta_flash.cu)
+  set_source_files_properties(
+    ops/launcher/gqa_attention_volta_flash.cu
+    ops/launcher/vision_attention_volta_flash.cu
+    TARGET_DIRECTORY ninfer_ops
+    PROPERTIES
+      INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/third_party/llama_cpp_fattn"
+      COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda;-diag-suppress=940>")
+endif()
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ninfer_nvfp4_tma)

@@ -5,6 +5,7 @@
 #include "ops/kernel/gqa_attention_decode.cuh"
 #include "ops/kernel/gqa_attention_decode_bf16.cuh"
 #include "ops/kernel/gqa_attention_decode_i8.cuh"
+#include "ops/kernel/gqa_attention_prefill_volta.cuh"
 #include "core/device.h" // CUDA_CHECK
 #include "ninfer/ops/gqa_attention.h"
 
@@ -88,10 +89,31 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
                             PagedKVBatchLayerView cache, const GqaSmallTInvocation& invocation,
                             std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
                             Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
-    constexpr int kBlock = 32 * WarpsPerCta;
     const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
     Tensor& cache_k = cache.k_pages;
     Tensor& cache_v = cache.v_pages;
+#ifdef NINFER_VOLTA_BUILD
+    // The Volta tensor-core kernel always splits the head dim 4 ways (DimSplit=4, enforced
+    // by its own static_assert), independent of the Ampere+ dispatch table's per-TokenTile
+    // WarpsPerCta choice -- see gqa_attention_prefill_volta.cuh's file comment for why.
+    constexpr int kBlock = 128;
+    gqa_attention_small_t_tc_volta_partial_kernel<Geometry, TokenTile, 4, MultiBatch, Masked,
+                                                  CacheInput><<<grid, kBlock, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(q.data), input,
+        static_cast<const std::int32_t*>(pos.data), static_cast<__nv_bfloat16*>(cache_k.data),
+        static_cast<__nv_bfloat16*>(cache_v.data),
+        static_cast<const std::int32_t*>(cache.block_tables.data),
+        invocation.valid_columns == nullptr
+            ? nullptr
+            : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+        invocation.table_rows == nullptr
+            ? nullptr
+            : static_cast<const std::int32_t*>(invocation.table_rows->data),
+        cache.block_tables.ne[0], invocation.width, invocation.full_width, invocation.column_begin,
+        logical_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
+        static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+#else
+    constexpr int kBlock = 32 * WarpsPerCta;
     // bf16 kernel uses only static smem (no dynamic staging).
     gqa_attention_small_t_tc_partial_bf16_kernel<Geometry, TokenTile, WarpsPerCta, MultiBatch,
                                                  Masked, CacheInput><<<grid, kBlock, 0, stream>>>(
@@ -108,6 +130,7 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
         cache.block_tables.ne[0], invocation.width, invocation.full_width, invocation.column_begin,
         logical_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
         static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+#endif
     CUDA_CHECK(cudaGetLastError());
 }
 

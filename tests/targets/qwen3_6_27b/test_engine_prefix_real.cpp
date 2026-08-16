@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -45,13 +46,19 @@ ninfer::PromptInput chinese_chat(bool enable_thinking) {
     return input;
 }
 
-int exercise_registered_frontend(const ninfer::Engine& engine) {
-    if (engine.count_tokens(chinese_chat(true)) != 16) {
-        std::cerr << "registered tokenizer/chat template changed the thinking prompt golden\n";
+int exercise_registered_frontend(const ninfer::Engine& engine, std::string_view target) {
+    const std::uint32_t thinking_tokens    = engine.count_tokens(chinese_chat(true));
+    const std::uint32_t no_thinking_tokens = engine.count_tokens(chinese_chat(false));
+    const std::uint32_t expected_thinking    = target == "qwen3_8_27b" ? 58 : 16;
+    const std::uint32_t expected_no_thinking = 18;
+    if (thinking_tokens != expected_thinking) {
+        std::cerr << "registered tokenizer/chat template changed the thinking prompt golden: "
+                  << thinking_tokens << '\n';
         return 1;
     }
-    if (engine.count_tokens(chinese_chat(false)) != 18) {
-        std::cerr << "registered tokenizer/chat template changed the no-thinking prompt golden\n";
+    if (no_thinking_tokens != expected_no_thinking) {
+        std::cerr << "registered tokenizer/chat template changed the no-thinking prompt golden: "
+                  << no_thinking_tokens << '\n';
         return 1;
     }
     return 0;
@@ -432,10 +439,10 @@ int exercise_vision(ninfer::Engine& engine) {
     return 0;
 }
 
-int verify_loaded_product(const ninfer::Engine& engine) {
+int verify_loaded_product(const ninfer::Engine& engine, std::string_view expected_target,
+                          std::string_view expected_weights) {
     const ninfer::LoadSummary load = engine.load_summary();
-    if (load.target != "qwen3_6_27b" ||
-        (load.weights_id != "groupwise-int" && load.weights_id != "nvfp4") ||
+    if (load.target != expected_target || load.weights_id != expected_weights ||
         load.host_to_device_bytes == 0 || load.artifact_bytes_read < load.host_to_device_bytes) {
         std::cerr << "Engine construction has an invalid load summary: target=" << load.target
                   << " weights=" << load.weights_id << '\n';
@@ -456,10 +463,16 @@ int verify_loaded_product(const ninfer::Engine& engine) {
 
 } // namespace
 
-int exercise_artifact(const char* artifact) {
+int exercise_artifact(const char* artifact, std::string_view expected_target,
+                      std::string_view expected_weights) {
     ninfer::Engine engine(engine_options(artifact));
-    if (const int result = verify_loaded_product(engine); result != 0) { return result; }
-    if (const int result = exercise_registered_frontend(engine); result != 0) { return result; }
+    if (const int result = verify_loaded_product(engine, expected_target, expected_weights);
+        result != 0) {
+        return result;
+    }
+    if (const int result = exercise_registered_frontend(engine, expected_target); result != 0) {
+        return result;
+    }
     if (const int result = exercise_full_prefill_chunk(engine); result != 0) { return result; }
     if (const int result = exercise_prefix(engine); result != 0) { return result; }
     if (const int result = exercise_rewrite_checkpoints(engine); result != 0) { return result; }
@@ -468,18 +481,34 @@ int exercise_artifact(const char* artifact) {
 }
 
 int main() {
-    const char* groupwise = std::getenv("NINFER_QWEN3_6_27B_WEIGHTS");
-    const char* nvfp4     = std::getenv("NINFER_QWEN3_6_27B_NVFP4_WEIGHTS");
-    if ((groupwise == nullptr || *groupwise == '\0') && (nvfp4 == nullptr || *nvfp4 == '\0')) {
-        std::cout << "skip: neither NINFER_QWEN3_6_27B_WEIGHTS nor "
-                     "NINFER_QWEN3_6_27B_NVFP4_WEIGHTS is set\n";
+    const char* qwen36_groupwise = std::getenv("NINFER_QWEN3_6_27B_WEIGHTS");
+    const char* qwen36_nvfp4     = std::getenv("NINFER_QWEN3_6_27B_NVFP4_WEIGHTS");
+    const char* qwen38_groupwise = std::getenv("NINFER_QWEN3_8_27B_WEIGHTS");
+    if ((qwen36_groupwise == nullptr || *qwen36_groupwise == '\0') &&
+        (qwen36_nvfp4 == nullptr || *qwen36_nvfp4 == '\0') &&
+        (qwen38_groupwise == nullptr || *qwen38_groupwise == '\0')) {
+        std::cout << "skip: no registered 27B real-artifact test environment variable is set\n";
         return 77;
     }
-    if (groupwise != nullptr && *groupwise != '\0') {
-        if (const int result = exercise_artifact(groupwise); result != 0) { return result; }
+    if (qwen36_groupwise != nullptr && *qwen36_groupwise != '\0') {
+        if (const int result =
+                exercise_artifact(qwen36_groupwise, "qwen3_6_27b", "groupwise-int");
+            result != 0) {
+            return result;
+        }
     }
-    if (nvfp4 != nullptr && *nvfp4 != '\0') {
-        if (const int result = exercise_artifact(nvfp4); result != 0) { return result; }
+    if (qwen36_nvfp4 != nullptr && *qwen36_nvfp4 != '\0') {
+        if (const int result = exercise_artifact(qwen36_nvfp4, "qwen3_6_27b", "nvfp4");
+            result != 0) {
+            return result;
+        }
+    }
+    if (qwen38_groupwise != nullptr && *qwen38_groupwise != '\0') {
+        if (const int result =
+                exercise_artifact(qwen38_groupwise, "qwen3_8_27b", "groupwise-int");
+            result != 0) {
+            return result;
+        }
     }
     std::cout << "ok\n";
     return 0;

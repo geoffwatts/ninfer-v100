@@ -1,3 +1,4 @@
+#include "core/nvtx.h"
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/program.h"
 
@@ -1758,6 +1759,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
 
     const auto start = Clock::now();
     try {
+        nvtx::ScopedRange ordinary_round_range(nvtx::Name::DecodeOrdinaryRound, nvtx::Category::Decode);
         DecodeGraphExecutable* executable = nullptr;
         ops::GqaExecutionEnvelope envelope{maximum_frontier + 1, maximum_frontier + 1};
         if (use_cuda_graph) {
@@ -1794,9 +1796,15 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             tail_hidden_store};
 
         mark_workspace_usage(workspace_plan.ordinary_round);
-        schedule::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
-                                        envelope, executable);
-        device.synchronize();
+        {
+            nvtx::ScopedRange submit_range(nvtx::Name::DecodeOrdinarySubmit, nvtx::Category::Decode);
+            schedule::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
+                                            envelope, executable);
+        }
+        {
+            nvtx::ScopedRange wait_range(nvtx::Name::DecodeOrdinaryWait, nvtx::Category::Decode);
+            device.synchronize();
+        }
 
         const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -1870,6 +1878,7 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 
     const auto started = Clock::now();
     try {
+        nvtx::ScopedRange mtp_round_range(nvtx::Name::DecodeMtpRound, nvtx::Category::Mtp);
         DecodeGraphExecutable* executable = nullptr;
         schedule::MtpGqaEnvelopes envelopes =
             mtp_gqa_envelopes(maximum_frontier, draft_window, capacity);
@@ -1926,9 +1935,15 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                                  tail_hidden_store};
 
         mark_workspace_usage(workspace_plan.mtp_round);
-        schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
-                                   draft_window, envelopes, executable);
-        device.synchronize();
+        {
+            nvtx::ScopedRange submit_range(nvtx::Name::DecodeMtpSubmit, nvtx::Category::Mtp);
+            schedule::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
+                                       draft_window, envelopes, executable);
+        }
+        {
+            nvtx::ScopedRange wait_range(nvtx::Name::DecodeMtpWait, nvtx::Category::Mtp);
+            device.synchronize();
+        }
 
         const double seconds = std::chrono::duration<double>(Clock::now() - started).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
