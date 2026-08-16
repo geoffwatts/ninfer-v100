@@ -227,7 +227,11 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
     constexpr std::int32_t q_rows      = 6144;
     constexpr std::int32_t kv_rows     = 1024;
     constexpr std::int32_t parent_rows = q_rows + kv_rows;
+    const std::int32_t min_tokens = *std::min_element(options.tokens.begin(), options.tokens.end());
     const std::int32_t max_tokens = *std::max_element(options.tokens.begin(), options.tokens.end());
+    const std::size_t workspace_bytes =
+        ops::q4_q5_attn_input_proj_workspace_capacity_bytes(min_tokens, max_tokens);
+    WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 1));
     bench::PackedQuantizedWeight qk = bench::make_row_split_weight(
         QType::Q4G64_F16S, parent_rows, hidden, hidden, {0x31, 0x00, 0x3c00});
     bench::PackedQuantizedWeight gv = bench::make_row_split_weight(
@@ -244,7 +248,8 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
         Tensor tk(k.p, DType::BF16, {kv_rows, tokens});
         Tensor tv(v.p, DType::BF16, {kv_rows, tokens});
         const auto launch = [&](cudaStream_t launch_stream) {
-            ops::attn_input_proj(x, qk.weight, gv.weight, tq, tg, tk, tv, launch_stream);
+            ops::attn_input_proj(x, qk.weight, gv.weight, tq, tg, tk, tv, workspace,
+                                 launch_stream);
         };
         const CacheState profile_cache =
             options.cache == CacheMode::Cold ? CacheState::Cold : CacheState::Warm;
@@ -261,7 +266,7 @@ void run_q4q5(const Options& options, DeviceBuffer& flush, cudaStream_t stream,
                 (options.cache == CacheMode::Warm && cache != CacheState::Warm))
                 continue;
             append_result(
-                results, "q4q5", "a16", tokens, cache, 0, logical, flops,
+                results, "q4q5", "a16", tokens, cache, workspace_bytes, logical, flops,
                 measure_public(launch, cache, flush, stream, options.warmup, options.repeat));
         }
     }
