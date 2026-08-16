@@ -3,7 +3,7 @@
 // Drives the vendored llama.cpp MMA flash-attention kernel
 // (third_party/llama_cpp_fattn, pinned at 62bf73d25) from a ninfer-native
 // launcher. Rationale, phase gates and measurements: docs/volta-port.md and
-// docs/volta-flash-attention-plan.md.
+// docs/volta-port.md.
 //
 // This is the only translation unit that sees the vendored headers, which is
 // why the vendored include directory is scoped to this file in CMake: the

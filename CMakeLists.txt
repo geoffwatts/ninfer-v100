@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 # Upstream ninfer is compiled only for sm_120a. This fork adds sm_70 (Volta /
-# Tesla V100) as a second accepted target for the in-progress Volta port; see
+# Tesla V100) as a second accepted, hardware-validated target; see
 # docs/volta-port.md. Validate before CUDA compiler detection so CMake never
 # injects a generic host-toolchain default or accepts an unsupported target.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)

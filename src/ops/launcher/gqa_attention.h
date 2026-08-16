@@ -63,7 +63,7 @@ void gqa_attention_prompt_attention_launch(const Tensor& q, const Tensor& positi
 #ifdef NINFER_VOLTA_BUILD
 // Volta (sm_70) flash-attention prefill route. Defined in
 // gqa_attention_volta_flash.cu, the only translation unit that sees the vendored
-// llama.cpp kernel. See docs/volta-flash-attention-plan.md.
+// llama.cpp kernel. See docs/volta-port.md.
 
 // Q-block width. Bounds mask memory, which is O(tokens * visible_keys): a full
 // 12K prompt mask would be 288 MB and grows quadratically, one Q-block's is

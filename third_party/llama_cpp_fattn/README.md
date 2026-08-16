@@ -5,9 +5,8 @@ Vendored from [llama.cpp](https://github.com/ggml-org/llama.cpp), MIT licensed
 `src/ops/common/volta_mma.cuh`, which was transcribed from this project's
 `ggml-cuda/mma.cuh`.
 
-Used by the sm_70 prefill flash-attention route. Rationale, phase gates and
-measurements are in `docs/volta-flash-attention-plan.md` and
-`docs/volta-port.md`.
+Used by the sm_70 prefill flash-attention route. Rationale, validation, and
+measurements are in the [Volta port notes](../../docs/volta-port.md).
 
 ## Contents
 
@@ -16,7 +15,7 @@ measurements are in `docs/volta-flash-attention-plan.md` and
 | `mma.cuh` | `ggml/src/ggml-cuda/mma.cuh` | none (byte-for-byte) |
 | `cp-async.cuh` | `ggml/src/ggml-cuda/cp-async.cuh` | none (byte-for-byte) |
 | `fattn-mma-f16.cuh` | `ggml/src/ggml-cuda/fattn-mma-f16.cuh` | truncated + one config case, see below |
-| `fattn-stream-k.cuh` | `ggml/src/ggml-cuda/fattn-common.cuh` lines 721-971 | extracted verbatim |
+| `fattn-stream-k.cuh` | `ggml/src/ggml-cuda/fattn-common.cuh` lines 721-971 | extracted; terminal blank line removed |
 | `common.cuh` | shim, not upstream | see below |
 
 ## Deviations from upstream
@@ -47,6 +46,6 @@ measured, with no change in numerical accuracy. It sits under upstream's own
 
 ## Updating
 
-Re-vendor from a single upstream commit and re-run the Phase 0 harness
-(`docs/volta-port.md`) before trusting the result. Keep the pin in this file
-in sync.
+Re-vendor from a single upstream commit and re-run the numerical attention
+tests described in the [Volta port notes](../../docs/volta-port.md) before
+trusting the result. Keep the pin in this file in sync.

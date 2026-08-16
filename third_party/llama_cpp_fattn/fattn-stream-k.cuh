@@ -252,4 +252,3 @@ static __global__ void flash_attn_combine_results(
 
     dst[tid] = VKQ_numerator / VKQ_denominator;
 }
-
