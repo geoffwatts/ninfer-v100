@@ -44,6 +44,29 @@ On a natural A3B prompt, DFlash with two draft tokens measured 146.3 tok/s; MTP3
 V100 recommendation at 167.9 tok/s on the corresponding decode benchmark. These are model-specific
 measurements, not a cross-model quality or speed comparison.
 
+### Concurrent serving
+
+The table below uses the groupwise-integer artifacts with INT8-G64 KV, MTP3, stochastic sampling,
+and a fixed wave of simultaneous HTTP requests. Every request generated 8,192 tokens with prefix
+reuse disabled. Rates include only complete one-second intervals in which all requests were
+decode-ready, no prefill was running, and the measured decode batch equalled the requested
+concurrency. `Aggregate / C` is the mean per-request rate during those fully saturated intervals.
+
+| Model | C | Avg batch | Aggregate decode | Aggregate / C | Speedup vs C1 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.6-35B-A3B | 1 | 1.00 | 152.7 tok/s | 152.7 tok/s | 1.00x |
+| Qwen3.6-35B-A3B | 2 | 2.00 | 133.6 tok/s | 66.8 tok/s | 0.87x |
+| Qwen3.6-35B-A3B | 4 | 4.00 | 147.3 tok/s | 36.8 tok/s | 0.96x |
+| Qwen3.6-35B-A3B | 8 | 8.00 | 152.4 tok/s | 19.0 tok/s | 1.00x |
+| Qwen3.8-27B | 1 | 1.00 | 39.4 tok/s | 39.4 tok/s | 1.00x |
+| Qwen3.8-27B | 2 | 2.00 | 35.2 tok/s | 17.6 tok/s | 0.89x |
+| Qwen3.8-27B | 4 | 4.00 | 39.8 tok/s | 10.0 tok/s | 1.01x |
+| Qwen3.8-27B | 8 | 8.00 | 44.7 tok/s | 5.6 tok/s | 1.13x |
+
+The scheduler reaches every requested batch width, but aggregate scaling on one V100 is modest:
+the dense model gains 13% at C8, while A3B is effectively throughput-flat. Concurrency is therefore
+most useful for sharing a saturated GPU across requests, not for preserving single-request latency.
+
 ## Requirements
 
 - 64-bit Linux;
