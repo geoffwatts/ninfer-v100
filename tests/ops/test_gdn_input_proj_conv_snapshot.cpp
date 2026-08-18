@@ -772,6 +772,9 @@ int run_nvfp4_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearP
     return failures;
 }
 
+// NVFP4 needs Blackwell-only cvt.e2m1x2; its sub-sm_80 branch is a __trap(). On Volta the case
+// aborts the process and takes the Q4/Q5 and W8 results down with it, so it is skipped here.
+#ifndef NINFER_VOLTA_BUILD
 int run_nvfp4() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
@@ -820,6 +823,7 @@ int run_nvfp4() {
     return failures;
 }
 
+#endif // NINFER_VOLTA_BUILD
 } // namespace
 
 int main() {
@@ -839,11 +843,23 @@ int main() {
         std::cerr << "Q4/Q5 snapshot interval did not retain its non-monotonic T=4 route\n";
         ++failures;
     }
-    if (ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 1, 16) !=
-            0 ||
-        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 1, 17) !=
-            ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 17,
-                                                                       17)) {
+    // The property under test is that the interval query agrees with its right endpoint across
+    // the zero/nonzero seam, not where the seam sits. That width is route-table data and differs
+    // by architecture: sm_120a computes in place up to W=16 and materialises a projected plane
+    // from 17, while Volta's W8 snapshot has no in-place route above W=1 and materialises from 2
+    // (see the NINFER_VOLTA_BUILD branch in gdn_input_proj_conv_snapshot_workspace_capacity_bytes).
+#ifdef NINFER_VOLTA_BUILD
+    constexpr std::int32_t kW8InPlaceLast = 1;
+#else
+    constexpr std::int32_t kW8InPlaceLast = 16;
+#endif
+    constexpr std::int32_t kW8FirstMaterialized = kW8InPlaceLast + 1;
+    if (ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 1,
+                                                                   kW8InPlaceLast) != 0 ||
+        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(2048, 2048, 4096, 1, 1,
+                                                                   kW8FirstMaterialized) !=
+            ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+                2048, 2048, 4096, 1, kW8FirstMaterialized, kW8FirstMaterialized)) {
         std::cerr << "W8 snapshot interval did not preserve its zero/nonzero route boundary\n";
         ++failures;
     }
@@ -861,7 +877,11 @@ int main() {
     }
     failures += run_q4_q5();
     failures += run_w8();
+#ifndef NINFER_VOLTA_BUILD
     failures += run_nvfp4();
+#else
+    std::cout << "SKIP nvfp4: no FP4 hardware on Volta\n";
+#endif
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_snapshot\n";
     return failures == 0 ? 0 : 1;
 }

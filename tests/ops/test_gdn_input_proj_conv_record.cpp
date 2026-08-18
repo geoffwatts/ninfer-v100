@@ -282,6 +282,9 @@ int run_w8() {
     return failures;
 }
 
+// NVFP4 needs Blackwell-only cvt.e2m1x2; its sub-sm_80 branch is a __trap(). On Volta the case
+// aborts the process and takes the Q4/Q5 and W8 results down with it, so it is skipped here.
+#ifndef NINFER_VOLTA_BUILD
 int run_nvfp4() {
     constexpr std::int32_t kHidden    = 5120;
     constexpr std::int32_t kValueRows = 6144;
@@ -332,6 +335,7 @@ int run_nvfp4() {
     return failures;
 }
 
+#endif // NINFER_VOLTA_BUILD
 } // namespace
 
 int main() {
@@ -343,7 +347,11 @@ int main() {
     int failures = 0;
     failures += run_q4_q5();
     failures += run_w8();
+#ifndef NINFER_VOLTA_BUILD
     failures += run_nvfp4();
+#else
+    std::cout << "SKIP nvfp4: no FP4 hardware on Volta\n";
+#endif
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_record\n";
     return failures == 0 ? 0 : 1;
 }

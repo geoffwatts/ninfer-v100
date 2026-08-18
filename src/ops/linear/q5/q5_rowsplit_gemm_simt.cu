@@ -86,6 +86,11 @@ void launch_split4(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t s
             w.padded_shape[1], 5);
 }
 
+// Reachable range is [2,15]: q5_dispatch carries split2 to T=15 and split4 only to T=10, both
+// measured crossovers. Cols 11..15 are therefore instantiated for split4 without being
+// dispatchable -- the two share this switch. Splitting the dispatcher per family would drop those
+// five kernels; not done because the shared form is what keeps the two routes' addressing
+// provably identical.
 template <class Launch>
 void dispatch_exact_cols(std::int32_t cols, Launch&& launch) {
     switch (cols) {
@@ -104,8 +109,35 @@ void dispatch_exact_cols(std::int32_t cols, Launch&& launch) {
     case 6:
         launch.template operator()<6>();
         return;
+    case 7:
+        launch.template operator()<7>();
+        return;
+    case 8:
+        launch.template operator()<8>();
+        return;
+    case 9:
+        launch.template operator()<9>();
+        return;
+    case 10:
+        launch.template operator()<10>();
+        return;
+    case 11:
+        launch.template operator()<11>();
+        return;
+    case 12:
+        launch.template operator()<12>();
+        return;
+    case 13:
+        launch.template operator()<13>();
+        return;
+    case 14:
+        launch.template operator()<14>();
+        return;
+    case 15:
+        launch.template operator()<15>();
+        return;
     default:
-        throw std::invalid_argument("q5 exact SIMT: column count must be in [2,6]");
+        throw std::invalid_argument("q5 exact SIMT: column count must be in [2,15]");
     }
 }
 

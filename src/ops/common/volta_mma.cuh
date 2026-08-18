@@ -109,6 +109,21 @@ __device__ __forceinline__ void volta_mma_qk(float (&d)[8], const half2 (&q)[4],
                  : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[2]), "r"(Bxi[3]));
 }
 
+// Raw-operand form of the same instruction, for the quadpair-split-N mapping (see
+// q4_volta_qpn_gemm.cuh). volta_mma_qk above passes one A and one B fragment that every quadpair
+// shares; the QPN mapping gives each quadpair its own B and its own accumulator half, so its
+// operands are per-quadpair registers rather than warp-wide fragments and cannot go through the
+// fragment-array signature. Identical instruction, one slice (4 real k) per call.
+__device__ __forceinline__ void volta_mma_qp_n(float (&d)[8], unsigned a0, unsigned a1,
+                                               unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
+                 "{%0, %1, %2, %3, %4, %5, %6, %7}, {%8, %9}, {%10, %11}, "
+                 "{%0, %1, %2, %3, %4, %5, %6, %7};"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+                   "+f"(d[6]), "+f"(d[7])
+                 : "r"(a0), "r"(a1), "r"(b0), "r"(b1));
+}
+
 // PV: PV[32x8 half, as output] += P[32x8 half, as A] @ V[8x8 half, as B]. Real k per call = 8.
 __device__ __forceinline__ void volta_mma_pv(half2 (&pv)[4], const half2 (&p)[4],
                                              const half2 (&v)[4]) {

@@ -3,6 +3,8 @@
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_kernels.h"
 #ifdef NINFER_VOLTA_BUILD
 #include "ops/gdn_input_proj/q4_q5/q4_q5_gdn_input_cutlass_sm70.h"
+#include "ops/linear/q4/q4_launch.h"
+#include "ops/linear/q5/q5_launch.h"
 #endif
 
 #include <algorithm>
@@ -44,10 +46,37 @@ struct RouteSpec {
 // This is the single largest remaining prefill cost this port found by profiling -- GDN layers
 // vastly outnumber full-attention layers in this hybrid model, so this op's SIMT fallback
 // dominated total prefill GPU time even after the other three CUTLASS conversions landed.
-// Same T=64 threshold as the rest of this port -- see docs/volta-port.md.
+// Crossover measured directly (cold cache, 48-layer op, both routes forced across T): SIMT
+// 781/1154/1400/2068us at T=16/24/32/48 against CUTLASS 1277/1276/1284/1290us. CUTLASS is
+// essentially T-independent here -- its cost is the two fixed dequant passes (q4 qk_weight,
+// q5 value_z_weight) -- so it wins from T=28 up, not T=64. The old 64 was inherited as a
+// blanket port-wide default rather than measured for this op, and cost up to 1.6x in T=33..63.
+// Band for the fused tensor-core route. This op is the single largest remaining consumer of
+// memory traffic in a concurrent round: at T=32 the CUTLASS schedule costs 1284us and runs on 48
+// of the 64 layers, ~32% of a C8 round, because it materialises both dequantised parents into
+// global FP16 every call (52 MB read, 168 MB written, 168 MB read back). The fused kernels read
+// each parent once at Q4/Q5 density.
+constexpr std::int32_t kVoltaMmaMinCols = 12;
+constexpr std::int32_t kVoltaMmaMaxCols = 64;
+
+[[nodiscard]] inline bool gdn_uses_volta_mma(const Q4Q5GdnInputProblem& p) noexcept {
+    return p.cols >= kVoltaMmaMinCols && p.cols <= kVoltaMmaMaxCols &&
+           q4_volta_mma_supported(p.qk_rows, p.input_rows, p.cols) &&
+           q5_volta_mma_supported(p.z_rows, p.input_rows, p.cols);
+}
+
+[[nodiscard]] inline std::size_t gdn_volta_mma_workspace_bytes(
+    const Q4Q5GdnInputProblem& p) noexcept {
+    // qk, value and z launch sequentially, each scoping its own fp32 partial, so the peak is the
+    // largest of the three rather than their sum.
+    const std::size_t a = q4_volta_mma_workspace_bytes(p.qk_rows, p.input_rows, p.cols);
+    const std::size_t b = q5_volta_mma_workspace_bytes(p.z_rows, p.input_rows, p.cols);
+    return a > b ? a : b;
+}
+
 constexpr std::array<RouteSpec, 2> kRoutes{{
-    {{1, 63}, Q4Q5GdnInputScheduleId::IndependentDirectFixed},
-    {{64, kAnyCols}, Q4Q5GdnInputScheduleId::CutlassSm70TensorCore},
+    {{1, 27}, Q4Q5GdnInputScheduleId::IndependentDirectFixed},
+    {{28, kAnyCols}, Q4Q5GdnInputScheduleId::CutlassSm70TensorCore},
 }};
 
 constexpr bool catalog_is_closed() noexcept {
@@ -83,6 +112,8 @@ const char* q4_q5_gdn_input_schedule_name(Q4Q5GdnInputScheduleId schedule) noexc
         return "gdn_input_proj.q4_q5.grouped_mixed.mma.r64.c128";
     case Q4Q5GdnInputScheduleId::CutlassSm70TensorCore:
         return "gdn_input_proj.q4_q5.cutlass_sm70.tensor_core";
+    case Q4Q5GdnInputScheduleId::VoltaMmaFused:
+        return "gdn_input_proj.q4_q5.volta_mma.fused";
     }
     return "gdn_input_proj.q4_q5.unknown";
 }
@@ -113,9 +144,22 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
         switch (route.schedule) {
         case Q4Q5GdnInputScheduleId::IndependentDirectFixed:
         case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
+#ifdef NINFER_VOLTA_BUILD
+            if (gdn_uses_volta_mma(problem)) {
+                return {Q4Q5GdnInputScheduleId::VoltaMmaFused,
+                        gdn_volta_mma_workspace_bytes(problem)};
+            }
+#endif
+            return plan;
+        case Q4Q5GdnInputScheduleId::VoltaMmaFused:
+            plan.workspace_bytes = gdn_volta_mma_workspace_bytes(problem);
             return plan;
         case Q4Q5GdnInputScheduleId::CutlassSm70TensorCore:
 #ifdef NINFER_VOLTA_BUILD
+            if (gdn_uses_volta_mma(problem)) {
+                return {Q4Q5GdnInputScheduleId::VoltaMmaFused,
+                        gdn_volta_mma_workspace_bytes(problem)};
+            }
             plan.workspace_bytes = q4_q5_gdn_input_cutlass_workspace_bytes(problem.cols);
             return plan;
 #else
@@ -182,6 +226,21 @@ void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
     }
 
     switch (plan.schedule) {
+    case Q4Q5GdnInputScheduleId::VoltaMmaFused: {
+#ifdef NINFER_VOLTA_BUILD
+        Tensor qk    = qkv.slice(0, 0, problem.qk_rows);
+        Tensor value = qkv.slice(0, problem.qk_rows, problem.z_rows);
+        // value_z_weight is one [2*z_rows, k] parent: rows [0,z_rows) feed value, the rest feed z.
+        launch_q4_volta_mma(x, qk_weight, qk, workspace, stream);
+        launch_q5_volta_mma(x, value_z_weight, value, /*add_residual=*/false,
+                            /*weight_row_offset=*/0, workspace, stream);
+        launch_q5_volta_mma(x, value_z_weight, z, /*add_residual=*/false,
+                            /*weight_row_offset=*/problem.z_rows, workspace, stream);
+        return;
+#else
+        throw std::logic_error("Q4/Q5 GDN input: VoltaMmaFused is Volta-only");
+#endif
+    }
     case Q4Q5GdnInputScheduleId::IndependentDirectFixed: {
         Tensor qk    = qkv.slice(0, 0, problem.qk_rows);
         Tensor value = qkv.slice(0, problem.qk_rows, problem.z_rows);

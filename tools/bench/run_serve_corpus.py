@@ -29,6 +29,8 @@ TARGET_MODEL_IDS = {
 TARGET_ORDER = tuple(TARGET_MODEL_IDS)
 SPECULATIVE_MODES = {
     "mtp0": ("none", 0),
+    "mtp1": ("mtp", 1),
+    "mtp2": ("mtp", 2),
     "mtp3": ("mtp", 3),
     "dflash7": ("dflash", 7),
 }

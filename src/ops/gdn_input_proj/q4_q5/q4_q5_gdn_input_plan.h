@@ -14,6 +14,7 @@ enum class Q4Q5GdnInputScheduleId {
     IndependentDirectFixed,
     GroupedMixedMmaR64C128,
     CutlassSm70TensorCore,
+    VoltaMmaFused,
 };
 
 enum class Q4Q5GdnInputConvScheduleId {

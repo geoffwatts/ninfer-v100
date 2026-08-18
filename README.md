@@ -46,26 +46,32 @@ measurements, not a cross-model quality or speed comparison.
 
 ### Concurrent serving
 
-The table below uses the groupwise-integer artifacts with INT8-G64 KV, MTP3, stochastic sampling,
-and a fixed wave of simultaneous HTTP requests. Every request generated 8,192 tokens with prefix
-reuse disabled. Rates include only complete one-second intervals in which all requests were
-decode-ready, no prefill was running, and the measured decode batch equalled the requested
-concurrency. `Aggregate / C` is the mean per-request rate during those fully saturated intervals.
+The latest dense-model tuning run used Qwen3.8-27B with INT8-G64 KV, CUDA Graphs, the optimized
+proposal head, MTP3, greedy sampling, 512 generated tokens per request, and prefix reuse disabled.
+Each point is aggregate committed throughput while the requested concurrency remained fully
+decode-saturated. Route comparisons were warmed, interleaved, and checked with the graphics clock
+locked at 1,530 MHz; the representative final values are:
 
-| Model | C | Avg batch | Aggregate decode | Aggregate / C | Speedup vs C1 |
-|---|---:|---:|---:|---:|---:|
-| Qwen3.6-35B-A3B | 1 | 1.00 | 152.7 tok/s | 152.7 tok/s | 1.00x |
-| Qwen3.6-35B-A3B | 2 | 2.00 | 133.6 tok/s | 66.8 tok/s | 0.87x |
-| Qwen3.6-35B-A3B | 4 | 4.00 | 147.3 tok/s | 36.8 tok/s | 0.96x |
-| Qwen3.6-35B-A3B | 8 | 8.00 | 152.4 tok/s | 19.0 tok/s | 1.00x |
-| Qwen3.8-27B | 1 | 1.00 | 39.4 tok/s | 39.4 tok/s | 1.00x |
-| Qwen3.8-27B | 2 | 2.00 | 35.2 tok/s | 17.6 tok/s | 0.89x |
-| Qwen3.8-27B | 4 | 4.00 | 39.8 tok/s | 10.0 tok/s | 1.01x |
-| Qwen3.8-27B | 8 | 8.00 | 44.7 tok/s | 5.6 tok/s | 1.13x |
+| C | Verify width | Aggregate decode | Aggregate / C | Speedup vs C1 |
+|---:|---:|---:|---:|---:|
+| 1 | 4 | **51.8 tok/s** | 51.8 tok/s | 1.00x |
+| 2 | 8 | **68.5 tok/s** | 34.3 tok/s | 1.32x |
+| 4 | 16 | **105.9 tok/s** | 26.5 tok/s | 2.04x |
+| 8 | 32 | **181.1 tok/s** | 22.6 tok/s | **3.50x** |
 
-The scheduler reaches every requested batch width, but aggregate scaling on one V100 is modest:
-the dense model gains 13% at C8, while A3B is effectively throughput-flat. Concurrency is therefore
-most useful for sharing a saturated GPU across requests, not for preserving single-request latency.
+Across the tuning session, the corresponding points moved from 48.9 to 51.8 tok/s at C1, 58.0 to
+68.5 at C2, 76.9 to 105.9 at C4, and 106.9 to 181.1 at C8. The measured session gains were
+approximately **6%, 18%, 38%, and 65%**, respectively. The largest improvements come from fused
+dequantization on Volta tensor cores, exact-shape split-K tuning, and narrow-width quadpair-split-N
+kernels; the C1 path is already much closer to its single-pass weight-streaming limit.
+
+For a separate long-running stochastic reference, Qwen3.6-35B-A3B with the same INT8-G64 KV and
+MTP3 configuration measured 152.8, 181.6, 205.4, and 220.5 aggregate tok/s at C1, C2, C4, and C8.
+Those requests generated 8,192 tokens each, so the A3B figures should not be compared directly with
+the shorter greedy Qwen3.8 campaign above.
+
+Real serving throughput varies with prompt, sampling, speculative acceptance, context length, and
+clock state; benchmark figures from different protocols are intentionally reported separately.
 
 ## Requirements
 

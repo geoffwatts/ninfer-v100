@@ -145,8 +145,11 @@ add_library(ninfer_ops STATIC
   ops/linear/q4/q4_small_t_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_mma.cu
   ops/linear/q4/q4_rowsplit_gemm_simt.cu
+  ops/linear/q4/q4_volta_mma_gemm.cu
+  ops/linear/q4/q4_volta_qpn_gemm.cu
   ops/linear/q4/q4_rowsplit_gemv.cu
   ops/linear/q4/q4_dispatch.cpp
+  ops/linear/q5/q5_volta_mma_gemm.cu
   ops/linear/q5/q5_dispatch.cpp
   ops/linear/q5/q5_rowsplit_gemm_mma.cu
   ops/linear/q5/q5_rowsplit_gemm_simt.cu
@@ -183,6 +186,8 @@ add_library(ninfer_ops STATIC
   ops/linear/q6/q6_rowsplit_gemm_simt.cu
   ops/linear/w8/w8_rowsplit_gemm_mma.cu
   ops/linear/w8/w8_rowsplit_gemm_simt.cu
+  ops/linear/w8/w8_volta_mma_gemm.cu
+  ops/linear/w8/w8_volta_qpn_gemm.cu
   ops/linear/w8/w8_rowsplit_gemm_decode.cu
   ops/linear/w8/w8_small_t.cu
   ops/linear/w8/w8_rowsplit_gemm_splitk.cu

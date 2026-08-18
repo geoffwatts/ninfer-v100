@@ -209,6 +209,12 @@ int run_nvfp4_case(DevicePackedWeight& parent, std::int32_t tokens, ops::LinearP
     return failures;
 }
 
+// NVFP4 has no Volta implementation and never will -- cvt.e2m1x2 is Blackwell-only hardware, so
+// the codec's sub-sm_80 branch is a __trap() (see ops/linear/nvfp4/nvfp4_codec.cuh). Running the
+// case on sm_70 aborts the process on an unspecified launch failure, which takes the Q4/Q5 and W8
+// cases' results down with it: they run first, but their stdout is lost in the abort. Skipping
+// here is what makes this binary a usable oracle for the routes Volta does have.
+#ifndef NINFER_VOLTA_BUILD
 int run_nvfp4() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
@@ -226,6 +232,7 @@ int run_nvfp4() {
     failures += run_nvfp4_case(parent, 1024, ops::LinearPolicy::AllowA4);
     return failures;
 }
+#endif // NINFER_VOLTA_BUILD
 
 } // namespace
 
@@ -238,7 +245,11 @@ int main() {
     int failures = 0;
     failures += run_q4_q5();
     failures += run_w8();
+#ifndef NINFER_VOLTA_BUILD
     failures += run_nvfp4();
+#else
+    std::cout << "SKIP nvfp4: no FP4 hardware on Volta\n";
+#endif
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj\n";
     return failures == 0 ? 0 : 1;
 }

@@ -36,6 +36,13 @@ struct RouteSpec {
 constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
 
 #ifdef NINFER_VOLTA_BUILD
+// Lower edge of the fused tensor-core route. At exactly 16 it is a wash (that is q4_simt_r8_c8's
+// best point -- two exact eight-column tiles); it wins from 17 up, and SmallTExact's own ceiling
+// of 32 bounds the split-K buffer.
+constexpr std::int32_t kVoltaMmaMinCols = 16;
+#endif
+
+#ifdef NINFER_VOLTA_BUILD
 // MmaSplitHalfPairR32C*/Materialized-via-linear() route through Ampere+ mma/ldmatrix kernels
 // (q4_rowsplit_gemm_mma.cuh and friends), trap-stubbed on sm_70. SmallTExact's Volta compose
 // (a tuned q4 SIMT launch + silu_mul) is fully general over T via for_each_token_slice, and stays
@@ -145,6 +152,12 @@ Q4LinearSwiGluPlan q4_linear_swiglu_resolve_plan(const Q4LinearSwiGluProblem& pr
             // (general linear() into an unfused workspace, then silu_mul), so it needs
             // the same real workspace_bytes accounting Materialized does, not 0.
             plan.workspace_bytes = materialized_workspace_bytes(problem.gate_up_rows, problem.cols);
+            if (problem.cols >= kVoltaMmaMinCols) {
+                // The fused tensor-core gate_up route additionally needs an fp32 split-K
+                // accumulator (gate_up_rows * cols * 4 bytes).
+                plan.workspace_bytes +=
+                    q4_volta_mma_workspace_bytes(problem.gate_up_rows, problem.k, problem.cols);
+            }
             return plan;
 #endif
             return plan;
@@ -219,7 +232,18 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
             // T=2..4 MTP verify widths; the eight-column schedule owns the rest of this interval.
             auto scratch_scope = ws.scope();
             Tensor gate_up = allocate_materialized_workspace(ws, problem.gate_up_rows, problem.cols);
-            if (problem.cols <= 4) {
+            if (q4_uses_volta_qpn(problem.gate_up_rows, problem.k, problem.cols)) {
+                // Quadpair-split-N: below the fused 32x8 route's band, where that geometry would
+                // pad most of its A rows away. On this exact shape it measures 309.2us at T=8
+                // against sliced SIMT's 452.6, and 306.2 against 567.3 at T=7 -- see q4_launch.h.
+                launch_q4_volta_qpn(x, w, gate_up, stream);
+            } else if (problem.cols >= kVoltaMmaMinCols &&
+                q4_volta_mma_supported(problem.gate_up_rows, problem.k, problem.cols)) {
+                // Fused dequant + mma.sync.m8n8k4. Measured on the gate_up shape's sibling
+                // [4096,5120] against q4_simt_r8_c8, back to back through the same bench:
+                // T=16 141.3 -> 138.2us, T=24 199.7 -> 143.4us, T=32 259.1 -> 148.5us.
+                launch_q4_volta_mma(x, w, gate_up, ws, stream);
+            } else if (problem.cols <= 4) {
                 launch_q4_simt_r8_c4(x, w, gate_up, stream);
             } else {
                 launch_q4_simt_r8_c8(x, w, gate_up, stream);

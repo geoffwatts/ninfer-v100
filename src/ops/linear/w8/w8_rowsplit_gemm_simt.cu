@@ -67,12 +67,25 @@ template <int ColsPerWarp, int ColWarpsPerRow = 1>
 void launch_route(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     constexpr int kRowsPerCta = kRowsPerBlockDefault / ColWarpsPerRow;
     constexpr int kColsPerCta = ColsPerWarp * ColWarpsPerRow;
-    // The exact/full C16 specialization makes nvcc fully unroll both paired column warps on
-    // sm_70 and spills badly (T=16 measured 53.0 ms versus 19.0 ms for the otherwise identical
-    // predicated body). Keep the established full specialization for the one-warp schedules,
-    // but deliberately compile the paired-warp route through the lean predicated body.
-    const bool full = ColWarpsPerRow == 1 && (out.ne[0] % kRowsPerCta) == 0 &&
-                      (x.ne[1] % kColsPerCta) == 0;
+    // The exact/full specialization makes nvcc fully unroll the column loop on sm_70 and spills
+    // badly. First measured on the paired-warp C16 route (T=16: 53.0 ms versus 19.0 ms for the
+    // otherwise identical predicated body), which was excluded via ColWarpsPerRow == 1 -- but
+    // that exclusion *kept* the full body for the one-warp schedules, where the identical spill
+    // fires whenever T % kColsPerCta == 0. For r8_c8 that was T=8: the only such T reaching this
+    // route at the time, since T<8 fails the modulo and T>8 was then intercepted by r4_c16 (that
+    // interception has since been removed, so T=16/24/32 reach it too, and would spill likewise
+    // were the full body still enabled). Measured across the whole W8 inventory at the time of
+    // the fix, T=7 -> T=8: lm_head 6.41 -> 27.36 ms, mtp_mlp_gate_up 0.91 -> 3.81 ms,
+    // mtp_attn_qkv_gv 0.41 -> 1.56 ms -- 3.3-4.3x, and T=8 is slower than T=16 in every shape.
+    // With MTP3 that lands exactly on C2, which is where measured concurrency regresses.
+    // No Volta route wants the full body; keep it for sm_120a, where it is a win.
+#ifdef NINFER_VOLTA_BUILD
+    constexpr bool kAllowFullSpecialization = false;
+#else
+    constexpr bool kAllowFullSpecialization = true;
+#endif
+    const bool full = kAllowFullSpecialization && ColWarpsPerRow == 1 &&
+                      (out.ne[0] % kRowsPerCta) == 0 && (x.ne[1] % kColsPerCta) == 0;
     for_each_token_slice(x.ne[1], kColsPerCta, [&](std::int32_t offset, std::int32_t count) {
         const Tensor x_slice = x.slice(1, offset, count);
         Tensor out_slice     = out.slice(1, offset, count);

@@ -15,6 +15,7 @@ enum class Q4Q5AttnInputScheduleId {
     GroupedHomogeneousPairMmaR16C64S3,
     GroupedHomogeneousPairMmaR32C64S4,
     CutlassSm70TensorCore,
+    VoltaMmaFused,
 };
 
 struct Q4Q5AttnInputProblem {

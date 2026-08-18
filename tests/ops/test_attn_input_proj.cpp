@@ -90,7 +90,8 @@ int run_q4_q5() {
         quantized_weight::make_patterned_weight(QType::Q5G64_F16S, kParent, kHidden, 107U));
 
     int failures = 0;
-    for (const std::int32_t tokens : {1, 2, 16, 17, 21, 48}) {
+    // 24 and 32 are the C4/C8 MTP operating points, and 12 is the fused route's lower edge.
+    for (const std::int32_t tokens : {1, 2, 12, 16, 17, 21, 24, 32, 48}) {
         failures += run_q4_q5_case(query_key, gate_value, tokens);
     }
     return failures;
@@ -168,6 +169,12 @@ int verify_direct_output_sampled(std::string_view label, const GuardedBf16Tensor
     return failures;
 }
 
+// Two families have no Volta implementation and abort the process rather than run wrong PTX:
+// the BF16 target route reaches ops/common/mma.cuh's ldmatrix helpers, whose sub-sm_75 branch is a
+// __trap(), and NVFP4 needs Blackwell-only cvt.e2m1x2. Both used to run before the W8 cases, so a
+// Volta build lost all W8 coverage in this binary to an abort in a route Volta was never going to
+// have. Skipped here so the Q4/Q5 and W8 assertions actually report.
+#ifndef NINFER_VOLTA_BUILD
 int run_bf16_target_case(DeviceWeight& parent, std::int32_t tokens) {
     constexpr std::int32_t kHidden      = 5120;
     constexpr std::int32_t kQRows       = 6144;
@@ -307,6 +314,7 @@ int run_nvfp4_target() {
     failures += run_nvfp4_target_case(parent, 1024, ops::LinearPolicy::AllowA4);
     return failures;
 }
+#endif // NINFER_VOLTA_BUILD
 
 int run_w8_target_case(DevicePackedWeight& parent, std::int32_t tokens) {
     constexpr std::int32_t kHidden      = 2048;
@@ -407,8 +415,13 @@ int main() {
 
     int failures = 0;
     failures += run_q4_q5();
+#ifndef NINFER_VOLTA_BUILD
     failures += run_bf16_target();
     failures += run_nvfp4_target();
+#else
+    std::cout << "SKIP bf16 target: no Volta mma/ldmatrix route\n";
+    std::cout << "SKIP nvfp4 target: no FP4 hardware on Volta\n";
+#endif
     failures += run_w8_target();
     failures += run_w8_companion();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " attn_input_proj\n";
