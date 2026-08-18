@@ -37,7 +37,7 @@ proposal head; acceptance varies by prompt, so real serving rates will vary.
 
 | Model and configuration | pp512 | pp4096 | pp12000 | Decode |
 |---|---:|---:|---:|---:|
-| Qwen3.8-27B, BF16 KV | 953.7 tok/s | 1,118.2 tok/s | 1,053.0 tok/s | 43.9 tok/s MTP3 |
+| Qwen3.8-27B, BF16 KV | 953.7 tok/s | 1,118.2 tok/s | 1,053.0 tok/s | 51.8 tok/s MTP3 |
 | Qwen3.6-35B-A3B, INT8 KV | 625.9 tok/s | 749.3 tok/s | 743.1 tok/s | 167.9 tok/s MTP3 |
 
 On a natural A3B prompt, DFlash with two draft tokens measured 146.3 tok/s; MTP3 remains the default
