@@ -12,22 +12,23 @@ Volta path rather than weakening or emulating the Blackwell kernels.
 
 ## Volta status
 
-The port is tested on a Tesla V100-SXM2-32GB with CUDA 12.8.61. The following groupwise-integer
-artifacts run end to end on the V100:
+The port is tested on a Tesla V100-SXM2-32GB with CUDA 12.8.61. The following table gives the
+current status of each groupwise-integer artifact on the V100:
 
 | Model | Artifact | Text | Vision | MTP | DFlash | BF16 / INT8 KV |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `qwen3_6_27b.ninfer` | yes | yes | yes | — | yes |
-| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `qwen3_8_27b.ninfer` | yes | yes | yes | — | yes |
-| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `qwen3_6_35b_a3b.ninfer` | yes | yes | yes | yes | yes |
+| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `qwen3_6_27b.ninfer` | yes | known issue | yes | — | yes |
+| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `qwen3_8_27b.ninfer` | yes | known issue | yes | — | yes |
+| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `qwen3_6_35b_a3b.ninfer` | yes | known issue | yes | yes | yes |
 
 NVFP4 is intentionally unsupported on Volta: V100 has no FP4 hardware. Use the `groupwise-int`
 artifacts above.
 
 Implemented Volta routes include FP16 tensor-core prefill, BF16 and INT8-G64 KV cache, CUDA Graph
-decode, MTP speculative decoding, A3B grouped sparse MoE, DFlash for A3B, vision attention, prefix
-reuse, and small-scale batched serving. See the [Volta technical notes](docs/volta-port.md) for the
-design, validation scope, benchmark method, and remaining limitations.
+decode, MTP speculative decoding, A3B grouped sparse MoE, DFlash for A3B, prefix reuse, and
+small-scale batched serving. Volta vision attention currently has a known shared-memory correctness
+failure and must not be enabled. See the [Volta technical notes](docs/volta-port.md) for the design,
+validation scope, benchmark method, and remaining limitations.
 
 ## V100 performance
 
@@ -72,6 +73,24 @@ the shorter greedy Qwen3.8 campaign above.
 
 Real serving throughput varies with prompt, sampling, speculative acceptance, context length, and
 clock state; benchmark figures from different protocols are intentionally reported separately.
+
+### Long-context dense decode
+
+Qwen3.8-27B was also measured at C1 with INT8-G64 KV, MTP3, the optimized proposal head, and locked
+graphics clocks. Long-context attention now raises its split ceiling across the full model window,
+uses a measured occupancy schedule, routes verification widths through an INT8 Volta tensor-core
+kernel, and pads the tensor-core shared tiles to avoid bank serialization.
+
+| Approximate context | Aggregate decode |
+|---:|---:|
+| 1K | **51.8 tok/s** |
+| 82K | **44.2 tok/s** |
+| 250K | **29.0 tok/s** |
+
+At 82K, the complete long-context session moved from 21.0 to 44.2 tok/s. At 250K, padding the
+tensor-core shared tiles moved the final route from 15.2 to 29.0 tok/s; the combined tensor-core
+routing and padding work reduced round time from 290.3 to 124.1 ms. These points use fixed prompts
+at each context and are not acceptance-normalized.
 
 ## Requirements
 

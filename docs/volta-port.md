@@ -15,9 +15,9 @@ required because CUDA 13 removed the `sm_70` target. The current model scope is:
 
 | Target | Artifact profile | Text | Vision | MTP | DFlash | KV cache |
 |---|---|:---:|:---:|:---:|:---:|---|
-| Qwen3.6-27B | `groupwise-int` | yes | yes | yes | — | BF16, INT8-G64 |
-| Qwen3.8-27B | `groupwise-int` | yes | yes | yes | — | BF16, INT8-G64 |
-| Qwen3.6-35B-A3B | `groupwise-int` | yes | yes | yes | yes | BF16, INT8-G64 |
+| Qwen3.6-27B | `groupwise-int` | yes | known issue | yes | — | BF16, INT8-G64 |
+| Qwen3.8-27B | `groupwise-int` | yes | known issue | yes | — | BF16, INT8-G64 |
+| Qwen3.6-35B-A3B | `groupwise-int` | yes | known issue | yes | yes | BF16, INT8-G64 |
 
 NVFP4 execution is excluded because Volta has no FP4 support. The source still contains guarded
 NVFP4 definitions so the same tree can build for `sm_120a`.
@@ -61,9 +61,10 @@ than replaying a small-T decode kernel over the growing prefix. This changes mea
 scaling from strongly superlinear behavior to an approximately flat token rate over the tested
 range.
 
-Vision attention uses the same Volta tensor-core family with the packed-sequence boundaries and
-workspace contract required by NInfer's multimodal path. Sliding-window and bidirectional proposal
-attention used by DFlash have dedicated SIMT fallbacks.
+The vision attention route uses the same Volta tensor-core family, but its current host/device tile
+geometry disagrees when sizing the shared combine buffer. Compute Sanitizer reports an invalid
+shared-memory write, so multimodal input is not currently a supported Volta path. Sliding-window
+and bidirectional proposal attention used by DFlash have dedicated SIMT fallbacks.
 
 ### Gated Delta Network
 
@@ -127,6 +128,23 @@ prefill throughput. On a fixed greedy MTP3 review fixture, the optimized proposa
 43.9 tok/s. A persistent-server run with a 1,639-token prompt and 8,192 generated tokens measured
 1,062.7 prefill tok/s and 39.0 decode tok/s at 2.36 accepted tokens per round.
 
+### Dense 27B long-context decode
+
+At C1 with INT8-G64 KV and MTP3, the current Qwen3.8-27B long-context curve is 51.8, 44.2, and
+29.0 tok/s at approximately 1K, 82K, and 250K context. Four changes establish that result:
+
+1. The decode split ceiling no longer binds before the model's 262,144-token limit.
+2. Long-window SIMT attention uses measured register targets to hide global-load latency.
+3. Verification widths route through a fused INT8-to-FP16 Volta tensor-core kernel while width-one
+   proposal steps retain the faster SIMT path.
+4. Both INT8 and BF16 tensor-core kernels pad their shared row stride, removing the near-worst-case
+   bank serialization caused by the original 512-byte stride.
+
+At width four, shared-tile padding changed the INT8 kernel from 9,277 to 3,630 microseconds at
+262K and from 3,308 to 1,288 microseconds at 82K. End to end, 82K moved from 21.0 to 44.2 tok/s over
+the complete long-context session. At 250K, padding moved the final route from 15.2 to 29.0 tok/s;
+the combined tensor-core routing and padding work reduced round time from 290.3 to 124.1 ms.
+
 ### Qwen3.6-35B-A3B prefill
 
 | Route | pp512 | pp4096 | pp12000 |
@@ -164,7 +182,7 @@ residency. The process fixes model, vision, and speculative allocations at start
 Qualification combines public-operator numerical oracles with real-artifact execution:
 
 - dense Qwen3.6/Qwen3.8 text generation, MTP, prefix reuse, and long-context continuation;
-- vision attention FP64-oracle coverage plus real multimodal engine paths;
+- text attention FP64-oracle coverage across BF16 and INT8-G64 cache routes;
 - BF16 and INT8-G64 attention with identity, offset, and fragmented page mappings;
 - A3B grouped sparse MoE at narrow, wide, and slice-boundary token counts;
 - A3B real-model prefill followed by ordinary and MTP decode;
@@ -181,6 +199,8 @@ model-free CI runner.
 ## Known limitations
 
 - Only `groupwise-int` artifacts are supported on V100; NVFP4 requires newer hardware.
+- Vision attention currently fails Compute Sanitizer with an invalid shared-memory write; do not
+  enable multimodal input on Volta until the combine-buffer geometry is corrected.
 - Validation targets the 32GB V100. The published model footprints leave little or no usable KV
   capacity on a 16GB board.
 - DFlash is A3B-only and text-only.

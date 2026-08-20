@@ -1,6 +1,25 @@
 #pragma once
 
-// ninfer::ops - Volta (sm_70) tensor-core GQA small-T attention partial kernel.
+// ninfer::ops - Volta (sm_70) tensor-core GQA small-T attention partial kernel, INT8-G64 cache.
+//
+// This is gqa_attention_small_t_tc_volta_partial_kernel (gqa_attention_prefill_volta.cuh) with
+// the KV cache dtype swapped from bf16 to the int8 + per-64-group-scale codec. The tile
+// topology, QK^T/PV compute core, online-softmax recurrence and partial_* output format are
+// character-for-character the same, and the file comment below still governs them; keep the two
+// files in step when either changes.
+//
+// Why it exists: the INT8 decode path was SIMT-only, and SIMT is what caps it. Measured at 82k,
+// width 4, the INT8 SIMT kernel runs at 1.86 TFLOP/s and the bf16 tensor-core kernel at 2.71 --
+// so bf16 beat int8 by 1.46x *while reading twice the bytes*, purely because it had tensor cores.
+// The two properties are separable: this kernel takes the tensor-core math and keeps int8's
+// halved traffic. See docs/volta-port.md.
+//
+// The only structural difference is where the fp16 that feeds mma.sync comes from. The bf16
+// kernel copies raw bf16 bytes into k_s/v_s and converts them in place, which works because bf16
+// and fp16 are both two bytes. int8 codes are one byte, so an in-place expansion would clobber
+// its own neighbours; instead the staging loop dequantizes through registers on the way in. That
+// costs nothing here, because cp_async below sm_80 is already a synchronous load+store through
+// registers (ops/common/memory.cuh) -- there is no async pipeline to break.
 //
 // Structurally mirrors gqa_attention_small_t_tc_partial_bf16_kernel's Ampere+ branch
 // (gqa_attention_decode_bf16.cuh) -- same paged-KV addressing, GQA row mapping, and
@@ -48,8 +67,10 @@
 
 #include "ops/common/volta_mma.cuh"
 #include "ops/kernel/gqa_attention_decode.cuh"
+#include "ops/kernel/gqa_attention_kv_quant.cuh"
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <math_constants.h>
 
 #include <cstdint>
@@ -58,9 +79,10 @@ namespace ninfer::ops {
 
 template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
           typename CacheInput>
-__launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_volta_partial_kernel(
-    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
-    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
+__launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_volta_partial_i8_kernel(
+    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
+    std::int8_t* cache_v_i8, __half* cache_k_scale, __half* cache_v_scale,
+    const std::int32_t* block_tables, const std::int32_t* valid_columns,
     const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
     std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity, float scale,
     __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
@@ -78,21 +100,29 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_volta_partial
     constexpr int DSlice        = D / DimSplit;    // this warp's PV output width
     constexpr int DChunksLocal  = DSlice / 8;       // this warp's resident accumulator chunks
     constexpr int PageIds       = 64;
+    constexpr int Groups        = D / kGqaKvQuantGroup; // quant groups per key row
     constexpr float Log2E       = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
 
-    // Declared fp16 (not bf16): Volta's mma.sync.m8n8k4 only accepts fp16 operands. K/V
-    // are cp.async'd here as raw bf16 bytes (matching the bf16 KV cache/input) and then
-    // converted in place to fp16 immediately after staging -- see the conversion passes
-    // below. Q is converted inline at the point of load, since it's read scalar-wise
-    // rather than via cp.async.
-    // Padded row stride -- see the identical note in gqa_attention_decode_i8_tc_volta.cuh. The
-    // mma feed reads down a column of these tiles, so an unpadded 512-byte row stride puts every
-    // row on the same shared-memory bank and serializes the load ~21 ways. Worth 2.56x on the
-    // int8 sibling; this kernel had the same layout and the same bug.
+    static_assert(D % kGqaKvQuantGroup == 0, "head dim must divide into whole quant groups");
+    static_assert(kGqaKvQuantGroup % 8 == 0,
+                  "an 8-wide staging chunk must sit inside one quant group, so it needs one scale");
+
+    // Declared fp16 (not bf16): Volta's mma.sync.m8n8k4 only accepts fp16 operands. Unlike the
+    // bf16 sibling kernel, which lands raw cache bytes here and reinterprets them in place, K/V
+    // arrive already dequantized to fp16 -- int8 codes are half the width of the destination, so
+    // an in-place expansion would overwrite the neighbouring chunk. Q is converted inline at the
+    // point of load, since it's read scalar-wise.
+    // Row stride is padded, not D. The mma feed reads *down* a column of these tiles -- one
+    // half2 per row at a fixed d -- so with an unpadded 512-byte row stride (D=256 halves) every
+    // row lands on the same shared-memory bank, since banks wrap every 128 bytes. ncu measured
+    // 724M bank conflicts against 891M wavefronts for 42.2M shared loads: ~21 replays per
+    // instruction, near the 32-way worst case, and L1/TEX throughput pinned at 85% while the
+    // tensor pipe idled. SmemPad shifts each row by a whole 16-byte vector so consecutive rows
+    // start 4 banks apart, which keeps every 16-byte store in the staging loop aligned.
     constexpr int SmemPad    = 8;
     constexpr int SmemStride = D + SmemPad;
-    static_assert(SmemPad % 8 == 0, "pad must preserve 16-byte alignment of the staged copies");
+    static_assert(SmemPad % 8 == 0, "pad must preserve 16-byte alignment of the staging stores");
     __shared__ __align__(16) half q_s[Br * SmemStride];
     __shared__ __align__(16) half k_s[Bc * SmemStride];
     __shared__ __align__(16) half v_s[Bc * SmemStride];
@@ -196,20 +226,52 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_volta_partial
     }
 
     if constexpr (CacheInput::writes_cache) {
-        for (int chunk = tid; chunk < valid_tokens * (D / 8); chunk += Threads) {
-            const int token = chunk / (D / 8);
-            const int d     = (chunk - token * (D / 8)) * 8;
-            const int p_tok = pos[token];
-            if (p_tok >= split_start && p_tok < split_end && p_tok >= 0 &&
-                p_tok < logical_capacity) {
-                const std::int64_t new_off = gqa_kv_new_index<Geometry>(kv_head, d, token);
-                const int lane2             = tid & 31;
-                int physical_page = lane2 == 0 ? paged_kv_physical_page(block_table, p_tok) : 0;
-                physical_page      = __shfl_sync(FullMask, physical_page, 0);
-                const std::int64_t cache_off =
-                    gqa_cache_index<Geometry>(physical_page, kv_head, d, p_tok & kPagedKVPageMask);
-                store_vec(&cache_k[cache_off], load_vec<int4>(&input.k[new_off]));
-                store_vec(&cache_v[cache_off], load_vec<int4>(&input.v[new_off]));
+        // Quantize this tile's new rows into the cache before any of it is staged back out.
+        // One warp owns one (token, 64-group) pair so that the absmax reduction that sets the
+        // group's scale is exactly a full-warp reduction: 32 lanes x 2 elements = 64 = one
+        // group. This mirrors the SIMT kernel's append block (gqa_attention_decode_i8.cuh);
+        // the codes have to come out bit-identical, since the two kernels share a cache.
+        const int warps = Threads / 32;
+        for (int pair = warp; pair < valid_tokens * Groups; pair += warps) {
+            const int token    = pair / Groups;
+            const int grp      = pair - token * Groups;
+            const int position = pos[token];
+            if (position < split_start || position >= split_end || position < 0 ||
+                position >= logical_capacity) {
+                continue;
+            }
+            int physical_page     = lane == 0 ? paged_kv_physical_page(block_table, position) : 0;
+            physical_page          = __shfl_sync(FullMask, physical_page, 0);
+            const int page_offset = position & kPagedKVPageMask;
+            const int d0          = grp * kGqaKvQuantGroup + lane;
+            const int d1          = d0 + 32;
+            const std::int64_t src0 = gqa_kv_new_index<Geometry>(kv_head, d0, token);
+            const std::int64_t src1 = gqa_kv_new_index<Geometry>(kv_head, d1, token);
+            const float kv0         = __bfloat162float(input.k[src0]);
+            const float kv1         = __bfloat162float(input.k[src1]);
+            const float vv0         = __bfloat162float(input.v[src0]);
+            const float vv1         = __bfloat162float(input.v[src1]);
+            float kamax             = fmaxf(fabsf(kv0), fabsf(kv1));
+            float vamax             = fmaxf(fabsf(vv0), fabsf(vv1));
+            kamax                   = warp_max(kamax, FullMask);
+            vamax                   = warp_max(vamax, FullMask);
+            const __half ksh        = __float2half_rn(kamax > 0.0f ? kamax / 127.0f : 0.0f);
+            const __half vsh        = __float2half_rn(vamax > 0.0f ? vamax / 127.0f : 0.0f);
+            const float k_inv       = __half2float(ksh) > 0.0f ? 1.0f / __half2float(ksh) : 0.0f;
+            const float v_inv       = __half2float(vsh) > 0.0f ? 1.0f / __half2float(vsh) : 0.0f;
+            cache_k_i8[gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d0, page_offset)] =
+                gqa_kv_quant_code(kv0, k_inv);
+            cache_k_i8[gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d1, page_offset)] =
+                gqa_kv_quant_code(kv1, k_inv);
+            cache_v_i8[gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d0, page_offset)] =
+                gqa_kv_quant_code(vv0, v_inv);
+            cache_v_i8[gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d1, page_offset)] =
+                gqa_kv_quant_code(vv1, v_inv);
+            if (lane == 0) {
+                const std::int64_t so =
+                    gqa_kv_quant_scale_index<Geometry>(physical_page, kv_head, grp, page_offset);
+                cache_k_scale[so] = ksh;
+                cache_v_scale[so] = vsh;
             }
         }
         __syncthreads();
@@ -269,58 +331,32 @@ __launch_bounds__(128, 2) __global__ void gqa_attention_small_t_tc_volta_partial
                 physical_page = physical_pages_s[(k0 >> kPagedKVPageShift) - first_page];
             }
 
+            // Stage K/V for this key tile, dequantizing int8 -> fp16 on the way in. Unlike the
+            // bf16 sibling there is no second in-place conversion pass: the codes are half the
+            // width of the fp16 destination, so they are widened in registers between the load
+            // and the store. Every key in range is read from the cache, including this tile's
+            // own new tokens -- the append block above has already written and __syncthreads()'d
+            // them, so there is no need for the bf16 kernel's separate "from_new" source.
             for (int chunk = tid; chunk < Bc * (D / 8); chunk += Threads) {
-                const int key_l      = chunk / (D / 8);
-                const int d          = (chunk - key_l * (D / 8)) * 8;
-                const int key = k0 + key_l;
-                half* k_dst   = &k_s[key_l * SmemStride + d]; // raw bf16 bytes; converted below
-                half* v_dst   = &v_s[key_l * SmemStride + d];
+                const int key_l = chunk / (D / 8);
+                const int d     = (chunk - key_l * (D / 8)) * 8;
+                const int key   = k0 + key_l;
+                half* k_dst     = &k_s[key_l * SmemStride + d];
+                half* v_dst     = &v_s[key_l * SmemStride + d];
                 if (key >= split_start && key < split_end) {
-                    if constexpr (CacheInput::writes_cache) {
-                        const int new_token = key - first_pos;
-                        const bool from_new =
-                            new_token >= 0 && new_token < valid_tokens && key >= first_pos;
-                        if (from_new) {
-                            const std::int64_t off = gqa_kv_new_index<Geometry>(kv_head, d, new_token);
-                            ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                            ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
-                        } else {
-                            const std::int64_t off = gqa_cache_index<Geometry>(
-                                physical_page, kv_head, d, key & kPagedKVPageMask);
-                            ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                            ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
-                        }
-                    } else {
-                        const std::int64_t off = gqa_cache_index<Geometry>(physical_page, kv_head, d,
-                                                                           key & kPagedKVPageMask);
-                        ninfer::ops::cp_async<16>(k_dst, &cache_k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &cache_v[off]);
-                    }
+                    const int page_offset = key & kPagedKVPageMask;
+                    const std::int64_t code_off =
+                        gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d, page_offset);
+                    const std::int64_t scale_off = gqa_kv_quant_scale_index<Geometry>(
+                        physical_page, kv_head, d / kGqaKvQuantGroup, page_offset);
+                    const float ks = __half2float(cache_k_scale[scale_off]);
+                    const float vs = __half2float(cache_v_scale[scale_off]);
+                    store_vec(k_dst, gqa_kv_dequant_i8x8_f16_from(&cache_k_i8[code_off], ks));
+                    store_vec(v_dst, gqa_kv_dequant_i8x8_f16_from(&cache_v_i8[code_off], vs));
                 } else {
                     store_vec(k_dst, make_int4(0, 0, 0, 0));
                     store_vec(v_dst, make_int4(0, 0, 0, 0));
                 }
-            }
-            ninfer::ops::cp_commit();
-            ninfer::ops::cp_wait<0>();
-            __syncthreads();
-
-            // cp.async above copied raw bf16 bytes into k_s/v_s (declared fp16 for the mma
-            // primitives below). Convert those bytes to real fp16 in place: each element is
-            // read and overwritten only by its own owning thread (idx is unique per thread
-            // per grid-stride step), so there's no cross-thread hazard to guard against here
-            // -- only the __syncthreads() after the loop, which ensures every thread's
-            // conversion has landed before any thread starts reading k_s/v_s as fp16 below.
-            // Walks the D real elements of each row and maps them through the padded stride, so
-            // the pad columns -- which the staging copy never wrote and the mma never reads --
-            // are left alone rather than converted from uninitialised shared memory.
-            for (int idx = tid; idx < Bc * D; idx += Threads) {
-                const int row  = idx / D;
-                const int off  = row * SmemStride + (idx - row * D);
-                const float kf = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(k_s)[off]);
-                const float vf = __bfloat162float(reinterpret_cast<const __nv_bfloat16*>(v_s)[off]);
-                k_s[off]       = __float2half(kf);
-                v_s[off]       = __float2half(vf);
             }
             __syncthreads();
 

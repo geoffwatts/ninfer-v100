@@ -288,9 +288,15 @@ SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_
 // capacity probe therefore uses only the envelope's bound, never its shape.
 bool volta_flash_route_possible(std::int32_t q_heads, std::int32_t width,
                                 std::int32_t batch_size, DType cache_dtype) {
-    // Both registered geometries are instantiated: 24q/4kv (ratio 6 -> ncols2 2)
-    // and 16q/2kv (ratio 8 -> ncols2 8).
-    return (q_heads == 24 || q_heads == 16) && batch_size == 1 &&
+    // 24q/4kv only (ratio 6 -> ncols2 2). 16q/2kv is also instantiated (ratio 8 -> ncols2 8),
+    // but it corrupts shared memory: the combine buffer is sized on the host from
+    // get_cols_per_warp(), which is 32 on Volta, while the kernel indexes it by the tile
+    // type's T_B_KQ::I, and those two disagree once ncols2 is 8. compute-sanitizer reports
+    // an invalid 8-byte __shared__ write at fattn-mma-f16.cuh:1483 (the combine-meta store)
+    // for every tile. ChunkedSmallT is the correct fallback -- slower, but it is the path
+    // 16q/2kv prefill used before the flash route existed. Re-enabling this geometry means
+    // reconciling the two cols_per_warp definitions upstream first.
+    return q_heads == 24 && batch_size == 1 &&
            (cache_dtype == DType::BF16 || cache_dtype == DType::I8) &&
            width >= detail::kVoltaFlashMinimumWidth;
 }
@@ -477,6 +483,9 @@ std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType c
         const detail::GqaAttentionRoute route =
             detail::gqa_attention_resolve_route(q_heads, width, batch_size, cache_dtype, envelope);
         if (route == detail::GqaAttentionRoute::Prompt) { return std::size_t{0}; }
+        // VoltaFlash carries its own staging, declared once from max_width above; reporting the
+        // chunked cost here instead would over-declare for an interval that routes there.
+        if (route == detail::GqaAttentionRoute::VoltaFlash) { return std::size_t{0}; }
         if (route == detail::GqaAttentionRoute::SmallT) { return chunk_capacity(width); }
         std::size_t maximum = 0;
         for (std::int32_t begin = 0; begin < width; begin += kSmallTChunkTokens) {
@@ -504,6 +513,25 @@ std::size_t gqa_attention_workspace_capacity_bytes(std::int32_t q_heads, DType c
     if (min_width <= kMaximumVerifyTokens) {
         const std::int32_t last = std::min(max_width, kMaximumVerifyTokens);
         for (std::int32_t width = min_width; width <= last; ++width) {
+            maximum = std::max(maximum, exact_capacity(width));
+        }
+    }
+    // Widths above the verify limit are single-batch, so they route to ChunkedSmallT (or, on
+    // Volta, to VoltaFlash, declared above). An interval that starts above the limit -- an
+    // exact-width declaration for one wide call -- would otherwise sample nothing and declare
+    // zero, and the chunk loop would then run off the end of the arena.
+    //
+    // Such a width costs the widest of its chunks, and its chunk decomposition is
+    // {kSmallTChunkTokens} plus the remainder, so the cost repeats with period
+    // kSmallTChunkTokens. Sampling one period from the bottom of the tail therefore visits
+    // every remainder the interval can produce and stays exact -- which matters, because the
+    // callers assert the declaration equals the execution high-water rather than merely
+    // bounding it. Sampling a single representative width would not do: chunk cost is not
+    // monotonic in the chunk width (the INT8 T=5 split policy is deliberately finer than T=4's).
+    if (max_width > kMaximumVerifyTokens) {
+        const std::int32_t begin = std::max(min_width, kMaximumVerifyTokens + 1);
+        const std::int32_t last  = std::min(max_width, begin + kSmallTChunkTokens - 1);
+        for (std::int32_t width = begin; width <= last; ++width) {
             maximum = std::max(maximum, exact_capacity(width));
         }
     }
