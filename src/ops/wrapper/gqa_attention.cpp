@@ -288,15 +288,9 @@ SmallTWorkspace allocate_small_t_workspace(Allocator& workspace, std::int32_t q_
 // capacity probe therefore uses only the envelope's bound, never its shape.
 bool volta_flash_route_possible(std::int32_t q_heads, std::int32_t width,
                                 std::int32_t batch_size, DType cache_dtype) {
-    // 24q/4kv only (ratio 6 -> ncols2 2). 16q/2kv is also instantiated (ratio 8 -> ncols2 8),
-    // but it corrupts shared memory: the combine buffer is sized on the host from
-    // get_cols_per_warp(), which is 32 on Volta, while the kernel indexes it by the tile
-    // type's T_B_KQ::I, and those two disagree once ncols2 is 8. compute-sanitizer reports
-    // an invalid 8-byte __shared__ write at fattn-mma-f16.cuh:1483 (the combine-meta store)
-    // for every tile. ChunkedSmallT is the correct fallback -- slower, but it is the path
-    // 16q/2kv prefill used before the flash route existed. Re-enabling this geometry means
-    // reconciling the two cols_per_warp definitions upstream first.
-    return q_heads == 24 && batch_size == 1 &&
+    // The built and validated geometries are 24q/4kv (ratio 6 -> ncols2 2) and
+    // 16q/2kv (ratio 8 -> ncols2 8). Host and device tile sizing agree for both on Volta.
+    return (q_heads == 24 || q_heads == 16) && batch_size == 1 &&
            (cache_dtype == DType::BF16 || cache_dtype == DType::I8) &&
            width >= detail::kVoltaFlashMinimumWidth;
 }
@@ -403,9 +397,8 @@ GqaAttentionRoute gqa_attention_resolve_route(std::int32_t q_heads, std::int32_t
     // verify, short prompts -- so a regression here can be bisected by routing alone.
     //
     // Restrictions, each a real precondition rather than caution:
-    //  - q_heads == 24 is the only geometry whose gqa_ratio (6) selects ncols2 = 2,
-    //    the configuration validated in docs/volta-port.md. 16q/2kv has ratio 8 and
-    //    would select a different instantiation that is not built here.
+    //  - q_heads == 24 and q_heads == 16 select the two built and validated
+    //    configurations (24q/4kv and 16q/2kv respectively).
     //  - min == max visible keys is what prefill passes (chunk_envelope{visible,
     //    visible}); it makes the key extent an exact host-side scalar, which the
     //    kernel needs as a launch parameter. Anything else is not a prefill call.

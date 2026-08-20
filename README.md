@@ -17,18 +17,17 @@ current status of each groupwise-integer artifact on the V100:
 
 | Model | Artifact | Text | Vision | MTP | DFlash | BF16 / INT8 KV |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `qwen3_6_27b.ninfer` | yes | known issue | yes | — | yes |
-| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `qwen3_8_27b.ninfer` | yes | known issue | yes | — | yes |
-| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `qwen3_6_35b_a3b.ninfer` | yes | known issue | yes | yes | yes |
+| [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `qwen3_6_27b.ninfer` | yes | yes | yes | — | yes |
+| [Qwen3.8-27B](https://huggingface.co/neroued/Qwen3.8-27B-NInfer) | `qwen3_8_27b.ninfer` | yes | yes | yes | — | yes |
+| [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `qwen3_6_35b_a3b.ninfer` | yes | yes | yes | yes | yes |
 
 NVFP4 is intentionally unsupported on Volta: V100 has no FP4 hardware. Use the `groupwise-int`
 artifacts above.
 
 Implemented Volta routes include FP16 tensor-core prefill, BF16 and INT8-G64 KV cache, CUDA Graph
-decode, MTP speculative decoding, A3B grouped sparse MoE, DFlash for A3B, prefix reuse, and
-small-scale batched serving. Volta vision attention currently has a known shared-memory correctness
-failure and must not be enabled. See the [Volta technical notes](docs/volta-port.md) for the design,
-validation scope, benchmark method, and remaining limitations.
+decode, MTP speculative decoding, A3B grouped sparse MoE, DFlash for A3B, vision attention, prefix
+reuse, and small-scale batched serving. See the [Volta technical notes](docs/volta-port.md) for the
+design, validation scope, benchmark method, and remaining limitations.
 
 ## V100 performance
 

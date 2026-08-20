@@ -15,9 +15,9 @@ required because CUDA 13 removed the `sm_70` target. The current model scope is:
 
 | Target | Artifact profile | Text | Vision | MTP | DFlash | KV cache |
 |---|---|:---:|:---:|:---:|:---:|---|
-| Qwen3.6-27B | `groupwise-int` | yes | known issue | yes | — | BF16, INT8-G64 |
-| Qwen3.8-27B | `groupwise-int` | yes | known issue | yes | — | BF16, INT8-G64 |
-| Qwen3.6-35B-A3B | `groupwise-int` | yes | known issue | yes | yes | BF16, INT8-G64 |
+| Qwen3.6-27B | `groupwise-int` | yes | yes | yes | — | BF16, INT8-G64 |
+| Qwen3.8-27B | `groupwise-int` | yes | yes | yes | — | BF16, INT8-G64 |
+| Qwen3.6-35B-A3B | `groupwise-int` | yes | yes | yes | yes | BF16, INT8-G64 |
 
 NVFP4 execution is excluded because Volta has no FP4 support. The source still contains guarded
 NVFP4 definitions so the same tree can build for `sm_120a`.
@@ -61,10 +61,10 @@ than replaying a small-T decode kernel over the growing prefix. This changes mea
 scaling from strongly superlinear behavior to an approximately flat token rate over the tested
 range.
 
-The vision attention route uses the same Volta tensor-core family, but its current host/device tile
-geometry disagrees when sizing the shared combine buffer. Compute Sanitizer reports an invalid
-shared-memory write, so multimodal input is not currently a supported Volta path. Sliding-window
-and bidirectional proposal attention used by DFlash have dedicated SIMT fallbacks.
+The vision attention route uses the same Volta tensor-core family. Both supported head geometries,
+24q/4kv and 16q/2kv, pass the attention test suites on V100; Compute Sanitizer reports no errors for
+the text or vision attention fixtures. Sliding-window and bidirectional proposal attention used by
+DFlash have dedicated SIMT fallbacks.
 
 ### Gated Delta Network
 
@@ -199,8 +199,6 @@ model-free CI runner.
 ## Known limitations
 
 - Only `groupwise-int` artifacts are supported on V100; NVFP4 requires newer hardware.
-- Vision attention currently fails Compute Sanitizer with an invalid shared-memory write; do not
-  enable multimodal input on Volta until the combine-buffer geometry is corrected.
 - Validation targets the 32GB V100. The published model footprints leave little or no usable KV
   capacity on a 16GB board.
 - DFlash is A3B-only and text-only.
