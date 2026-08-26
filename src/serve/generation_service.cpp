@@ -319,6 +319,36 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
     return prepared;
 }
 
+PreparedRequest GenerationService::prepare_completion(const CompletionRequest& request,
+                                                      std::function<bool()> is_cancelled) const {
+    PreparedRequest prepared;
+    ninfer::RequestOptions request_options = to_request_options(request, options_);
+    prepared.include_usage                 = request.include_usage;
+    prepared.enable_thinking = request.enable_thinking.value_or(options_.enable_thinking);
+    prepared.lifetime = acquire_request_lifetime();
+
+    try {
+        check_preparation_control(prepared.lifetime->deadline, is_cancelled);
+        const PreparationControl control{
+            .deadline     = prepared.lifetime->deadline,
+            .cancellation = CancellationView(is_cancelled),
+        };
+        ninfer::PreparedPrompt prompt =
+            engine_->prepare_text(request.prompt, prepared.enable_thinking, control);
+        check_preparation_control(prepared.lifetime->deadline, is_cancelled);
+        prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
+        prepared.preparation   = prompt.preparation_stats();
+        prepared.prepare_seconds =
+            std::chrono::duration<double>(Clock::now() - prepared.lifetime->started).count();
+        prepared.generation = engine_->submit(std::move(prompt), std::move(request_options),
+                                              prepared.lifetime->deadline);
+        prepared.sampling   = prepared.generation.resolved_sampling();
+    } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
+        throw_request_error(exception);
+    } catch (const std::invalid_argument& exception) { throw_invalid_input(exception); }
+    return prepared;
+}
+
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
     const bool request_has_media = request.media_item_count() != 0;

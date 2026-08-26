@@ -23,6 +23,27 @@ namespace ninfer::serve {
 GenerationRequest parse_chat_completion_request(const nlohmann::json& body,
                                                 const RequestLimits& limits);
 
+// Parses an already-decoded JSON body into a CompletionRequest for the legacy
+// /v1/completions endpoint. `prompt` accepts a string or an array of strings. Throws
+// ApiException on malformed or unsupported requests (multiple prompts, n>1, logprobs, ...).
+CompletionRequest
+parse_completion_request(const nlohmann::json& body, const RequestLimits& limits);
+
+// Legacy text-completion wire bodies (object "text_completion"). Streaming chunks carry
+// choices[0].text as the delta; the final chunk carries the finish_reason; the dedicated
+// usage chunk is only present when include_usage is set.
+std::string make_completion_response(const std::string& id, const std::string& model,
+                                     std::int64_t created, const std::string& text,
+                                     const char* finish_reason, const CompletionUsage& usage);
+std::string make_completion_chunk(const std::string& id, const std::string& model,
+                                  std::int64_t created, const std::string& delta_text,
+                                  bool include_usage);
+std::string make_completion_chunk_final(const std::string& id, const std::string& model,
+                                        std::int64_t created, const char* finish_reason,
+                                        bool include_usage);
+std::string make_completion_chunk_usage(const std::string& id, const std::string& model,
+                                        std::int64_t created, const CompletionUsage& usage);
+
 std::optional<bool> parse_openai_preserve_thinking(const nlohmann::json& body);
 
 // Non-streaming chat completion response body (JSON string). When `reasoning` is
@@ -73,6 +94,7 @@ std::string make_model_object(const std::string& model_id, std::int64_t created)
 std::string make_error_body(const ApiError& error);
 
 // Identifiers / timestamps.
+std::string new_completion_id();
 std::string new_chat_completion_id();
 std::int64_t unix_time_now();
 

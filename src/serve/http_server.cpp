@@ -279,6 +279,9 @@ void HttpServer::register_routes() {
                  [this](const httplib::Request& req, httplib::Response& res) {
                      handle_chat_completions(req, res);
                  });
+    server_.Post("/v1/completions", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_completions(req, res);
+    });
     server_.Post("/v1/responses", [this](const httplib::Request& req, httplib::Response& res) {
         handle_responses(req, res);
     });
@@ -486,6 +489,168 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
                     const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
                     write_stream_item(sink, *stream,
                                       make_chat_chunk_usage(id, model, created, usage));
+                }
+                write_stream_item(sink, *stream, sse_done());
+                sink.done();
+                return true;
+            } catch (const ClientDisconnected& e) {
+                log_request_error(log_context, e.what());
+                return false;
+            } catch (const ApiException& e) {
+                log_request_error(log_context, e.error().message);
+                try {
+                    write_stream_item(sink, *stream, sse_error_event(e.error()));
+                    sink.done();
+                    return true;
+                } catch (const ClientDisconnected&) { return false; }
+            } catch (const std::exception& e) {
+                log_request_error(log_context, e.what());
+                ApiError error;
+                error.status  = 500;
+                error.type    = "internal_error";
+                error.message = e.what();
+                try {
+                    write_stream_item(sink, *stream, sse_error_event(error));
+                    sink.done();
+                    return true;
+                } catch (const ClientDisconnected&) { return false; }
+            }
+        },
+        [stream](bool) { stream->cancelled.store(true, std::memory_order_release); });
+}
+
+void HttpServer::handle_completions(const httplib::Request& req, httplib::Response& res) {
+    nlohmann::json body;
+    try {
+        body = nlohmann::json::parse(req.body);
+    } catch (const std::exception&) {
+        ApiError error;
+        error.status  = 400;
+        error.message = "request body is not valid JSON";
+        write_error(res, error);
+        return;
+    }
+
+    CompletionRequest request;
+    try {
+        RequestLimits limits;
+        limits.default_max_tokens = options_.default_max_tokens;
+        request                   = parse_completion_request(body, limits);
+        if (request.model != public_model_id_) {
+            ApiError error;
+            error.status  = 404;
+            error.type    = "invalid_request_error";
+            error.code    = "model_not_found";
+            error.message = "model '" + request.model + "' not found";
+            throw ApiException(std::move(error));
+        }
+    } catch (const ApiException& e) {
+        write_error(res, e.error());
+        return;
+    }
+
+    const std::uint64_t req_id = ++request_seq_;
+    PreparedRequest prepared;
+    try {
+        prepared = service_->prepare_completion(
+            request, [&req] { return req.is_connection_alive && !req.is_connection_alive(); });
+    } catch (const ApiException& e) {
+        log_request_rejected(make_request_rejection_log_context(req_id, "openai_completions",
+                                                                request, e.error()));
+        write_error(res, e.error());
+        return;
+    } catch (const std::exception& e) {
+        ApiError error;
+        error.status  = 500;
+        error.type    = "internal_error";
+        error.message = e.what();
+        log_request_rejected(
+            make_request_rejection_log_context(req_id, "openai_completions", request, error));
+        write_error(res, error);
+        return;
+    }
+
+    const std::string id       = new_completion_id();
+    const std::int64_t created = unix_time_now();
+    const std::string model    = request.model;
+
+    const RequestLogContext log_context =
+        make_request_log_context(req_id, "openai_completions", request, prepared);
+    log_request_start(log_context);
+
+    if (!request.stream) {
+        try {
+            const GenerationOutcome outcome = service_->run(prepared, nullptr, [&req] {
+                return req.is_connection_alive && !req.is_connection_alive();
+            });
+            log_request_done(log_context, outcome);
+            const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+            const std::string response_body =
+                make_completion_response(id, model, created, outcome.text,
+                                         finish_reason_wire(outcome.finish_reason), usage);
+            set_owned_content(res, std::move(response_body), prepared.lifetime);
+        } catch (const std::exception& e) {
+            log_request_error(log_context, e.what());
+            throw;
+        }
+        return;
+    }
+
+    auto stream              = std::make_shared<StreamingRequest>(std::move(prepared));
+    const bool include_usage = stream->prepared.include_usage;
+
+    // SSE hints: disable client/proxy caching and reverse-proxy response buffering
+    // so tokens flush immediately. Content-Type is set by the chunked provider.
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [this, stream, id, created, model, include_usage, log_context](std::size_t,
+                                                                       httplib::DataSink& sink)
+            -> bool {
+            if (stream->started) {
+                sink.done();
+                return true;
+            }
+            stream->started = true;
+            try {
+                StreamSink output;
+                output.on_content = [&](const std::string& text) {
+                    write_stream_item(
+                        sink, *stream,
+                        make_completion_chunk(id, model, created, text, include_usage));
+                };
+                output.on_reasoning = [&](const std::string& text) {
+                    // Raw completions have no reasoning channel: any reasoning bytes join the
+                    // visible text rather than a separate field.
+                    write_stream_item(
+                        sink, *stream,
+                        make_completion_chunk(id, model, created, text, include_usage));
+                };
+                output.is_cancelled = [&] {
+                    return stream->cancelled.load(std::memory_order_acquire) ||
+                           (sink.is_writable && !sink.is_writable());
+                };
+
+                const GenerationOutcome outcome = service_->run(stream->prepared, &output);
+                log_request_done(log_context, outcome);
+                const std::string_view remaining = unstreamed_content(outcome);
+                if (!remaining.empty()) {
+                    write_stream_item(
+                        sink, *stream,
+                        make_completion_chunk(id, model, created, std::string(remaining),
+                                              include_usage));
+                }
+                write_stream_item(
+                    sink, *stream,
+                    make_completion_chunk_final(id, model, created,
+                                                finish_reason_wire(outcome.finish_reason),
+                                                include_usage));
+                if (include_usage) {
+                    const CompletionUsage usage{outcome.prompt_tokens, outcome.completion_tokens};
+                    write_stream_item(sink, *stream,
+                                      make_completion_chunk_usage(id, model, created, usage));
                 }
                 write_stream_item(sink, *stream, sse_done());
                 sink.done();

@@ -379,27 +379,26 @@ void parse_tool_choice(const Json& body, GenerationRequest& out) {
     }
 }
 
-void parse_stop(const Json& body, GenerationRequest& out) {
+void parse_stop(const Json& body, std::vector<std::string>& stop_strings) {
     if (!body.contains("stop") || body.at("stop").is_null()) { return; }
     const Json& stop = body.at("stop");
     if (stop.is_string()) {
         if (!stop.get<std::string>().empty()) {
-            out.stop_strings.push_back(stop.get<std::string>());
+            stop_strings.push_back(stop.get<std::string>());
         }
         return;
     }
     if (stop.is_array()) {
         for (const Json& s : stop) {
             if (!s.is_string()) { bad_request("stop entries must be strings", "stop"); }
-            if (!s.get<std::string>().empty()) { out.stop_strings.push_back(s.get<std::string>()); }
+            if (!s.get<std::string>().empty()) { stop_strings.push_back(s.get<std::string>()); }
         }
         return;
     }
     bad_request("stop must be a string or array of strings", "stop");
 }
 
-void parse_sampling(const Json& body, GenerationRequest& out) {
-    SamplingParams& s   = out.sampling;
+void parse_sampling(const Json& body, SamplingParams& s) {
     s.temperature       = get_number(body, "temperature");
     s.top_p             = get_number(body, "top_p");
     s.top_k             = get_int(body, "top_k");
@@ -477,6 +476,18 @@ Json tool_calls_json(const std::vector<ToolCall>& tool_calls, bool include_index
 
 std::string sse_event(const Json& payload) { return "data: " + payload.dump() + "\n\n"; }
 
+Json completion_base(const std::string& id, const std::string& model, std::int64_t created) {
+    return Json{
+        {"id", id}, {"object", "text_completion"}, {"created", created}, {"model", model}};
+}
+
+Json completion_choice_json(const std::string& text, const Json& finish_reason) {
+    return Json{{"text", text},
+                {"index", 0},
+                {"logprobs", nullptr},
+                {"finish_reason", finish_reason}};
+}
+
 } // namespace
 
 std::optional<bool> parse_openai_preserve_thinking(const Json& body) {
@@ -546,9 +557,8 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
     parse_tools(body, out);
     parse_tool_choice(body, out);
     parse_messages(body, out);
-    parse_stop(body, out);
-    parse_sampling(body, out);
-
+    parse_stop(body, out.stop_strings);
+    parse_sampling(body, out.sampling);
     out.stream = get_bool(body, "stream", false);
     if (body.contains("stream_options") && body.at("stream_options").is_object()) {
         out.include_usage = get_bool(body.at("stream_options"), "include_usage", false);
@@ -572,6 +582,100 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
     return out;
 }
 
+void reject_unsupported_completion_features(const Json& body) {
+    for (const char* key : {"functions", "function_call"}) {
+        if (body.contains(key) && !body.at(key).is_null()) {
+            ApiError error;
+            error.message = std::string(key) + " is not supported yet";
+            error.param   = key;
+            error.code    = "tools_not_supported";
+            throw ApiException(std::move(error));
+        }
+    }
+    if (body.contains("response_format") && !body.at("response_format").is_null()) {
+        ApiError error;
+        error.message = "response_format is not supported yet";
+        error.param   = "response_format";
+        error.code    = "response_format_not_supported";
+        throw ApiException(std::move(error));
+    }
+    if (body.contains("n") && !body.at("n").is_null()) {
+        if (!body.at("n").is_number_integer() || body.at("n").get<int>() != 1) {
+            ApiError error;
+            error.message = "n must be 1; only a single completion is supported";
+            error.param   = "n";
+            error.code    = "n_not_supported";
+            throw ApiException(std::move(error));
+        }
+    }
+    for (const char* key : {"logprobs", "top_logprobs", "suffix", "echo", "best_of"}) {
+        if (body.contains(key) && !body.at(key).is_null()) {
+            ApiError error;
+            error.message = std::string(key) + " is not supported yet";
+            error.param   = key;
+            error.code    = std::string(key) + "_not_supported";
+            throw ApiException(std::move(error));
+        }
+    }
+}
+
+CompletionRequest parse_completion_request(const Json& body, const RequestLimits& limits) {
+    require_object(body);
+    reject_unsupported_completion_features(body);
+
+    CompletionRequest out;
+    if (!body.contains("model") || !body.at("model").is_string() ||
+        body.at("model").get<std::string>().empty()) {
+        bad_request("missing required field: model", "model");
+    }
+    out.model = body.at("model").get<std::string>();
+
+    if (!body.contains("prompt")) { bad_request("missing required field: prompt", "prompt"); }
+    const Json& prompt = body.at("prompt");
+    if (prompt.is_string()) {
+        if (prompt.get<std::string>().empty()) {
+            bad_request("prompt must not be empty", "prompt");
+        }
+        out.prompt = prompt.get<std::string>();
+    } else if (prompt.is_array()) {
+        if (prompt.empty()) { bad_request("prompt must not be empty", "prompt"); }
+        if (prompt.size() > 1) {
+            ApiError error;
+            error.message = "multiple prompts are not supported yet";
+            error.param   = "prompt";
+            error.code    = "multiple_prompts_not_supported";
+            throw ApiException(std::move(error));
+        }
+        const Json& item = prompt.at(0);
+        if (!item.is_string()) { bad_request("prompt entries must be strings", "prompt"); }
+        if (item.get<std::string>().empty()) { bad_request("prompt must not be empty", "prompt"); }
+        out.prompt = item.get<std::string>();
+    } else {
+        bad_request("prompt must be a string or array of strings", "prompt");
+    }
+
+    parse_stop(body, out.stop_strings);
+    parse_sampling(body, out.sampling);
+
+    out.stream = get_bool(body, "stream", false);
+    if (body.contains("stream_options") && body.at("stream_options").is_object()) {
+        out.include_usage = get_bool(body.at("stream_options"), "include_usage", false);
+    }
+    if (body.contains("enable_thinking") && !body.at("enable_thinking").is_null()) {
+        out.enable_thinking = get_bool(body, "enable_thinking", false);
+    }
+
+    const std::optional<int> max_tokens = get_int(body, "max_tokens");
+    if (max_tokens) {
+        if (*max_tokens <= 0) { bad_request("max_tokens must be positive", "max_tokens"); }
+        out.max_tokens     = *max_tokens;
+        out.max_tokens_set = true;
+    } else {
+        out.max_tokens     = limits.default_max_tokens;
+        out.max_tokens_set = false;
+    }
+    return out;
+}
 std::string make_chat_completion_response(const std::string& id, const std::string& model,
                                           std::int64_t created, const std::string& content,
                                           const std::string& reasoning, const char* finish_reason,
@@ -609,6 +713,22 @@ std::string make_chat_completion_tool_response(const std::string& id, const std:
         {"choices",
          Json::array({Json{
              {"index", 0}, {"message", std::move(message)}, {"finish_reason", "tool_calls"}}})},
+        {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
+                       {"completion_tokens", usage.completion_tokens},
+                       {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
+    return payload.dump();
+}
+
+std::string make_completion_response(const std::string& id, const std::string& model,
+                                     std::int64_t created, const std::string& text,
+                                     const char* finish_reason, const CompletionUsage& usage) {
+    const Json payload = {
+        {"id", id},
+        {"object", "text_completion"},
+        {"created", created},
+        {"model", model},
+        {"choices",
+         Json::array({completion_choice_json(text, Json(finish_reason))})},
         {"usage", Json{{"prompt_tokens", usage.prompt_tokens},
                        {"completion_tokens", usage.completion_tokens},
                        {"total_tokens", usage.prompt_tokens + usage.completion_tokens}}}};
@@ -679,6 +799,35 @@ std::string make_chat_chunk_usage(const std::string& id, const std::string& mode
     return sse_event(payload);
 }
 
+std::string make_completion_chunk(const std::string& id, const std::string& model,
+                                  std::int64_t created, const std::string& delta_text,
+                                  bool include_usage) {
+    Json payload       = completion_base(id, model, created);
+    payload["choices"] = Json::array({completion_choice_json(delta_text, Json(nullptr))});
+    if (include_usage) { payload["usage"] = nullptr; }
+    return sse_event(payload);
+}
+
+std::string make_completion_chunk_final(const std::string& id, const std::string& model,
+                                        std::int64_t created, const char* finish_reason,
+                                        bool include_usage) {
+    Json payload       = completion_base(id, model, created);
+    payload["choices"] =
+        Json::array({completion_choice_json("", Json(finish_reason))});
+    if (include_usage) { payload["usage"] = nullptr; }
+    return sse_event(payload);
+}
+
+std::string make_completion_chunk_usage(const std::string& id, const std::string& model,
+                                        std::int64_t created, const CompletionUsage& usage) {
+    Json payload       = completion_base(id, model, created);
+    payload["choices"] = Json::array();
+    payload["usage"]   = Json{{"prompt_tokens", usage.prompt_tokens},
+                              {"completion_tokens", usage.completion_tokens},
+                              {"total_tokens", usage.prompt_tokens + usage.completion_tokens}};
+    return sse_event(payload);
+}
+
 std::string sse_done() { return "data: [DONE]\n\n"; }
 
 std::string make_models_list(const std::string& model_id, std::int64_t created) {
@@ -694,6 +843,14 @@ std::string make_model_object(const std::string& model_id, std::int64_t created)
     const Json payload = {
         {"id", model_id}, {"object", "model"}, {"created", created}, {"owned_by", "ninfer"}};
     return payload.dump();
+}
+
+std::string new_completion_id() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<std::uint64_t> dist;
+    std::array<char, 32> buf{};
+    std::snprintf(buf.data(), buf.size(), "%016llx", static_cast<unsigned long long>(dist(rng)));
+    return "cmpl-" + std::string(buf.data());
 }
 
 std::string make_error_body(const ApiError& error) {

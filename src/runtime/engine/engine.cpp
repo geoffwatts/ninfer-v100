@@ -217,6 +217,28 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
         impl_->active);
 }
 
+PreparedPrompt Engine::prepare_text(std::string_view text, bool enable_thinking,
+                                    const PreparationControl& control) const {
+    if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    const SamplingMode sampling_mode =
+        enable_thinking ? SamplingMode::Thinking : SamplingMode::NonThinking;
+    return std::visit(
+        [&](const auto& target_ptr) -> PreparedPrompt {
+            if (target_ptr == nullptr) { throw std::logic_error("Engine target is not active"); }
+            auto prepared      = target_ptr->loaded->frontend.prepare_text(text, control);
+            PromptSummary info = prepared.summary();
+            if (info.prompt_tokens > target_ptr->capacity) {
+                throw RequestError(
+                    RequestErrorKind::ContextLengthExceeded,
+                    context_capacity_error(info.prompt_tokens, target_ptr->capacity));
+            }
+            const PromptPreparationStats preparation = prepared.preparation_stats();
+            return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
+                info, preparation, sampling_mode, std::move(prepared)));
+        },
+        impl_->active);
+}
+
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     return std::visit(

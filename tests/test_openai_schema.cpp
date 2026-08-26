@@ -704,6 +704,140 @@ int test_finish_reason_wire() {
     return failures;
 }
 
+int test_parse_completions_request() {
+    int failures = 0;
+    const Json body = {
+        {"model", "qwen3.8-27b"},
+        {"prompt", "Once upon a time"},
+        {"max_tokens", 64},
+        {"stop", Json::array({std::string("END"), std::string("")})},
+        {"temperature", 0.5},
+        {"stream", true},
+        {"stream_options", Json{{"include_usage", true}}},
+    };
+    const CompletionRequest req = parse_completion_request(body, default_limits());
+    failures += check(req.model == "qwen3.8-27b", "completions model parsed");
+    failures += check(req.prompt == "Once upon a time", "completions prompt parsed");
+    failures += check(req.max_tokens == 64 && req.max_tokens_set, "completions max_tokens parsed");
+    failures += check(req.stop_strings.size() == 1 && req.stop_strings[0] == "END",
+                      "completions stop parsed, empty entry dropped");
+    failures += check(req.sampling.temperature.has_value() && *req.sampling.temperature == 0.5,
+                      "completions temperature parsed");
+    failures += check(req.stream && req.include_usage, "completions stream options parsed");
+    failures += check(!req.enable_thinking.has_value(), "completions thinking left to server");
+
+    const Json array_prompt = {{"model", "m"},
+                               {"prompt", Json::array({std::string("single")})}};
+    const CompletionRequest array_req = parse_completion_request(array_prompt, default_limits());
+    failures += check(array_req.prompt == "single", "single-prompt array parsed");
+    failures +=
+        check(array_req.max_tokens == 512 && !array_req.max_tokens_set,
+              "completions max_tokens default applied");
+
+    failures += check(
+        api_code([&] {
+            const Json multi = {{"model", "m"},
+                                {"prompt",
+                                 Json::array({std::string("a"), std::string("b")})}};
+            (void)parse_completion_request(multi, default_limits());
+        }) == "multiple_prompts_not_supported",
+        "multiple prompts rejected");
+    failures += check(
+        api_code([&] {
+            const Json n2 = {{"model", "m"}, {"prompt", "a"}, {"n", 2}};
+            (void)parse_completion_request(n2, default_limits());
+        }) == "n_not_supported",
+        "n>1 rejected");
+    failures += check(
+        throws_api([&] {
+            const Json empty = {{"model", "m"}, {"prompt", ""}};
+            (void)parse_completion_request(empty, default_limits());
+        }),
+        "empty prompt rejected");
+    failures += check(
+        throws_api([&] {
+            const Json missing_model = {{"prompt", "a"}};
+            (void)parse_completion_request(missing_model, default_limits());
+        }),
+        "missing model rejected");
+    failures += check(
+        throws_api([&] {
+            const Json missing_prompt = {{"model", "m"}};
+            (void)parse_completion_request(missing_prompt, default_limits());
+        }),
+        "missing prompt rejected");
+    failures += check(
+        throws_api([&] {
+            const Json number_prompt = {{"model", "m"}, {"prompt", 42}};
+            (void)parse_completion_request(number_prompt, default_limits());
+        }),
+        "non-string prompt rejected");
+    for (const char* key : {"logprobs", "top_logprobs", "suffix", "echo", "best_of"}) {
+        failures += check(
+            api_code([&] {
+                const Json body = {{"model", "m"}, {"prompt", "a"}, {key, 1}};
+                (void)parse_completion_request(body, default_limits());
+            }) == std::string(key) + "_not_supported",
+            std::string(key) + " rejected");
+    }
+    failures += check(
+        api_code([&] {
+            const Json body = {{"model", "m"},
+                               {"prompt", "a"},
+                               {"response_format", Json{{"type", "json_object"}}}};
+            (void)parse_completion_request(body, default_limits());
+        }) == "response_format_not_supported",
+        "response_format rejected");
+    return failures;
+}
+
+int test_completion_serialization() {
+    int failures   = 0;
+    const CompletionUsage usage{4, 9};
+    const Json response = Json::parse(make_completion_response(
+        "cmpl-1", "m", 100, "answer text", "stop", usage));
+    failures += check(response.at("object") == "text_completion", "completion object");
+    failures += check(response.at("id") == "cmpl-1", "completion id");
+    failures += check(response.at("created") == 100, "completion created");
+    failures += check(response.at("model") == "m", "completion model");
+    failures += check(response.at("choices").at(0).at("text") == "answer text",
+                      "completion text");
+    failures += check(response.at("choices").at(0).at("index") == 0, "completion choice index");
+    failures += check(response.at("choices").at(0).at("logprobs").is_null(),
+                      "completion logprobs null");
+    failures +=
+        check(response.at("choices").at(0).at("finish_reason") == "stop", "completion finish");
+    failures += check(response.at("usage").at("prompt_tokens") == 4, "usage prompt tokens");
+    failures += check(response.at("usage").at("completion_tokens") == 9, "usage completion");
+    failures += check(response.at("usage").at("total_tokens") == 13, "usage total");
+
+    const Json delta = parse_sse(make_completion_chunk("cmpl-1", "m", 100, "to", false));
+    failures += check(delta.at("object") == "text_completion", "chunk object");
+    failures += check(delta.at("choices").at(0).at("text") == "to", "chunk delta text");
+    failures += check(delta.at("choices").at(0).at("finish_reason").is_null(),
+                      "chunk finish null");
+    failures += check(!delta.contains("usage"), "no usage key when include_usage=false");
+
+    const Json delta_usage = parse_sse(make_completion_chunk("cmpl-1", "m", 100, "to", true));
+    failures += check(delta_usage.contains("usage") && delta_usage.at("usage").is_null(),
+                      "chunk usage null when include_usage=true");
+
+    const Json final_chunk =
+        parse_sse(make_completion_chunk_final("cmpl-1", "m", 100, "length", true));
+    failures += check(final_chunk.at("choices").at(0).at("finish_reason") == "length",
+                      "final completion finish");
+    failures += check(final_chunk.at("choices").at(0).at("text") == "",
+                      "final completion text empty");
+
+    const Json usage_chunk = parse_sse(make_completion_chunk_usage("cmpl-1", "m", 100, usage));
+    failures += check(usage_chunk.at("choices").is_array() && usage_chunk.at("choices").empty(),
+                      "completion usage chunk has empty choices");
+    failures += check(usage_chunk.at("usage").at("prompt_tokens") == 4,
+                      "completion usage chunk prompt");
+    failures += check(new_completion_id().rfind("cmpl-", 0) == 0, "completion id prefix");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -722,6 +856,8 @@ int main() {
     failures += test_response_serialization();
     failures += test_tool_response_serialization();
     failures += test_chunk_serialization();
+    failures += test_parse_completions_request();
+    failures += test_completion_serialization();
     failures += test_tool_chunk_serialization();
     failures += test_models_and_error();
     failures += test_finish_reason_wire();

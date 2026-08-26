@@ -102,6 +102,8 @@ public:
 
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
+    [[nodiscard]] PreparedRequest prepare_completion(const CompletionRequest& req,
+                                                     std::function<bool()> is_cancelled = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 

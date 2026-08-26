@@ -1353,6 +1353,35 @@ int test_media_preparation_cancellation() {
     return check(false, "cancelled media preparation completed successfully");
 }
 
+int test_raw_text_prepare(const Frontend& frontend) {
+    const std::vector<ninfer::TokenId> encoded = frontend.tokenize("xx");
+    int failures = check(encoded == std::vector<ninfer::TokenId>{0, 0},
+                         "raw tokenize did not encode text without a chat template");
+
+    auto raw = frontend.prepare_text("xx");
+    const auto& data = FrontendFactory::inspect(raw);
+    failures += check(data.token_ids == std::vector<ninfer::TokenId>{0, 0},
+                      "raw prepare_text token ids");
+    failures += check(!data.starts_in_reasoning, "raw prepare_text claimed a reasoning start");
+    failures += check(data.identity.reusable && !data.identity.rewrite_checkpoint,
+                      "raw prepare_text identity");
+    failures += check(!data.has_media(), "raw prepare_text gained media");
+    failures += check(throws_invalid_argument([&] { (void)frontend.prepare_text(""); }),
+                      "empty raw text was accepted");
+
+    ninfer::PreparationControl control{
+        .deadline     = {},
+        .cancellation = ninfer::CancellationView([] { return true; }),
+    };
+    try {
+        (void)frontend.prepare_text("x", control);
+    } catch (const ninfer::RequestError& error) {
+        failures += check(error.kind() == ninfer::RequestErrorKind::Cancelled,
+                          "cancelled raw preparation threw the wrong error");
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -1379,6 +1408,7 @@ int main() {
     failures += test_media_cache_reuses_immutable_payload();
     failures += test_media_payload_outlives_frontend_cache();
     failures += test_media_live_bytes_follow_last_payload_reference();
+    failures += test_raw_text_prepare(frontend);
     failures += test_media_cache_singleflight();
     failures += test_media_cache_runs_independent_misses_in_parallel();
     failures += test_many_images_prepare_in_one_parallel_batch();

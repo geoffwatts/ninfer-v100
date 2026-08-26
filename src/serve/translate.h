@@ -34,6 +34,10 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
 // --greedy on the server forces exact argmax regardless of the request.
 ninfer::RequestOptions to_request_options(const GenerationRequest& req, const ServeOptions& server);
 
+// Legacy completions never use tools, so the raw output keeps special tokens decoded.
+ninfer::RequestOptions to_request_options(const CompletionRequest& req,
+                                          const ServeOptions& server);
+
 // Map an internal finish reason onto the OpenAI wire value. Cancelled maps to
 // "stop" (a disconnected client is not an error state on the wire).
 const char* finish_reason_wire(ninfer::FinishReason reason);

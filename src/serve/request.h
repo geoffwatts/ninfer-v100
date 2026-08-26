@@ -204,4 +204,19 @@ struct GenerationRequest {
     }
 };
 
+// Wire-independent representation of a legacy text-completion request. The prompt is raw
+// text: it is tokenized without the chat template and the model's raw output is returned.
+// The schema layer enforces exactly one prompt and one completion per request.
+struct CompletionRequest {
+    std::string model;
+    std::string prompt;
+    std::vector<std::string> stop_strings;
+    int max_tokens      = 0; // 0 => use server default
+    bool max_tokens_set = false;
+    bool stream         = false;
+    bool include_usage  = false;
+    std::optional<bool> enable_thinking; // non-standard extension; falls back to server default
+    SamplingParams sampling;
+};
+
 } // namespace ninfer::serve

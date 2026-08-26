@@ -87,6 +87,14 @@ RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
                                                               const GenerationRequest& request,
                                                               ApiError error);
 
+RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
+                                           const CompletionRequest& request,
+                                           const PreparedRequest& prepared);
+RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
+                                                              std::string protocol,
+                                                              const CompletionRequest& request,
+                                                              ApiError error);
+
 // Compact console records retained for operator visibility.
 std::string format_request_start(const RequestLogContext& context);
 std::string format_request_rejected(const RequestRejectionLogContext& context);

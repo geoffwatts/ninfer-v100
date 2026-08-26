@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6 {
@@ -121,6 +122,13 @@ public:
 
     [[nodiscard]] PreparedPrompt prepare(PromptInput input,
                                          const PreparationControl& control = {}) const;
+    // Raw text input path: encodes `text` exactly as given, without the chat template, and
+    // returns the token ids so callers can verify the prompt that reaches the Engine.
+    [[nodiscard]] std::vector<TokenId> tokenize(std::string_view text) const;
+    // Raw text input path: tokenizes `text` without the chat template and prepares it as a
+    // non-reasoning prompt suitable for legacy text-completion endpoints.
+    [[nodiscard]] PreparedPrompt prepare_text(std::string_view text,
+                                              const PreparationControl& control = {}) const;
     [[nodiscard]] std::uint32_t count_tokens(PromptInput input,
                                              const PreparationControl& control = {}) const;
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> token_ids,

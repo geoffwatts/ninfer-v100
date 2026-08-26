@@ -337,6 +337,40 @@ RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
     return context;
 }
 
+RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
+                                           const CompletionRequest& request,
+                                           const PreparedRequest& prepared) {
+    RequestLogContext context;
+    context.id                                 = id;
+    context.protocol                           = std::move(protocol);
+    context.model                              = request.model;
+    context.stream                             = request.stream;
+    context.message_count                      = 1; // one raw prompt
+    context.requested_output_tokens            = request.max_tokens;
+    context.requested_output_tokens_client_set = request.max_tokens_set;
+    context.enable_thinking                    = prepared.enable_thinking;
+    context.sampling                           = prepared.sampling;
+    context.acquisition_seconds                = prepared.acquisition_seconds;
+    context.preparation                        = prepared.preparation;
+    return context;
+}
+
+RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
+                                                              std::string protocol,
+                                                              const CompletionRequest& request,
+                                                              ApiError error) {
+    RequestRejectionLogContext context;
+    context.id                                 = id;
+    context.protocol                           = std::move(protocol);
+    context.model                              = request.model;
+    context.stream                             = request.stream;
+    context.message_count                      = 1; // one raw prompt
+    context.requested_output_tokens            = request.max_tokens;
+    context.requested_output_tokens_client_set = request.max_tokens_set;
+    context.error                              = std::move(error);
+    return context;
+}
+
 std::string format_request_start(const RequestLogContext& context) {
     std::ostringstream out;
     out << "[req " << context.id << "] " << context.protocol << ' '

@@ -988,6 +988,23 @@ MediaCacheSummary Frontend::media_cache_summary() const {
     };
 }
 
+std::vector<TokenId> Frontend::tokenize(std::string_view text) const {
+    std::vector<TokenId> token_ids;
+    const std::vector<int> encoded = impl_->tokenizer->encode(text, fi::EncodeOptions{});
+    token_ids.reserve(encoded.size());
+    for (const int token : encoded) { token_ids.push_back(static_cast<TokenId>(token)); }
+    return token_ids;
+}
+
+PreparedPrompt Frontend::prepare_text(std::string_view text,
+                                      const PreparationControl& control) const {
+    fi::check_preparation_control(control);
+    std::vector<TokenId> token_ids = tokenize(text);
+    fi::check_preparation_control(control, "tokenization");
+    return prepare_tokens(std::move(token_ids), true);
+}
+
+
 PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids,
                                         bool allow_prefix_identity) const {
     const auto start = Clock::now();

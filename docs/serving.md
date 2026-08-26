@@ -46,6 +46,7 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
+| `POST /v1/completions` | OpenAI-style raw-text completion without a chat template |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
 | `GET /v1/responses/{id}` | retrieve a locally stored terminal Response |
@@ -156,6 +157,47 @@ the prepared token count and configured context ceiling. A media preprocessing r
 returns HTTP 400 `media_budget_exceeded`. HTTP 413 `request_too_large` is reserved for a raw request
 body that exceeds `--max-request-mib` before JSON parsing; it is not used for model-context or media
 resource errors.
+
+## OpenAI Completions
+
+```bash
+curl http://127.0.0.1:8080/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.6-27b",
+    "prompt": "Once upon a time",
+    "max_tokens": 128,
+    "stream": true
+  }'
+```
+
+The endpoint accepts the legacy OpenAI completions contract with one raw-text input. The prompt is
+tokenized directly with the artifact tokenizer; no chat template is rendered, so there is no system
+instruction, no assistant turn prefix, and no reasoning framing. Media is not accepted.
+The request `model` must equal the public model ID, exactly as on the other endpoints.
+
+The endpoint supports:
+
+- `prompt` as a string or a single-string array; multiple prompts are rejected with
+  `multiple_prompts_not_supported`;
+- `max_tokens` (default `--default-max-tokens`);
+- `temperature`, `top_p`, `top_k`, presence/frequency penalties, and a nonnegative `seed`;
+- one stop string or an array of stop strings;
+- non-streaming responses and server-sent event streams ending in `data: [DONE]`;
+- `stream_options.include_usage`;
+- the non-standard `enable_thinking` extension, which falls back to the server default (`--no-thinking`).
+
+`n` is rejected with `n_not_supported`, and recognized-but-unsupported fields fail with a field-specific
+400 error: `logprobs`, `top_logprobs`, `suffix`, `echo`, `best_of`, `response_format`, `functions`, and
+`function_call`.
+
+The response carries `object: "text_completion"`, a single `choices[0].text`, `finish_reason`
+(`stop` or `length`), and `usage` with `prompt_tokens`, `completion_tokens`, and `total_tokens`.
+Because no chat template is applied, the prompt begins exactly at the first token of the input text.
+Thinking mode is resolved the same way as on the chat endpoints, but the model's own reasoning
+preamble, including any `
+` block it emits, is not split into a separate channel; it appears verbatim in
+`choices[0].text`. Use `/v1/chat/completions` when the reasoning channel must be separated.
 
 ## OpenAI Responses Core
 

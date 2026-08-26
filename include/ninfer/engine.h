@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <memory>
+#include <string_view>
 
 namespace ninfer {
 
@@ -67,6 +68,11 @@ public:
 
     [[nodiscard]] PreparedPrompt prepare(PromptInput input,
                                          const PreparationControl& control = {}) const;
+
+    // Raw text input for non-templated completion endpoints: encodes `text` without the chat
+    // template. `enable_thinking` selects the sampling preset as it does for `prepare`.
+    [[nodiscard]] PreparedPrompt prepare_text(std::string_view text, bool enable_thinking,
+                                             const PreparationControl& control = {}) const;
 
     // Raw token input is retained for parity tools and repeatable performance measurement.
     [[nodiscard]] PreparedPrompt prepare_tokens(std::vector<TokenId> token_ids,
